@@ -7,6 +7,11 @@
 //! duplicated, or coalesced notifications can never lose data. On every
 //! reconnect (and on a periodic safety schedule) a sync runs regardless of
 //! notifications.
+//!
+//! Telemetry model: the daemon never holds a long-lived span. Each time-bound
+//! operation — a backup pass (`daemon.backup`) or an applied sync batch
+//! (`daemon.sync`) — records its own root trace, so traces stay short and
+//! export promptly even though the process runs indefinitely.
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -63,7 +68,9 @@ pub enum StreamEnd {
 
 /// Runs the daemon for a single policy: an initial backup pass (backfill
 /// and/or catch-up), then the streaming loop with reconnection.
+#[allow(clippy::too_many_arguments)]
 pub async fn run<S: MailSource, T: MailStore>(
+    name: &str,
     source: &mut S,
     store: &mut T,
     policy: &BackupPolicy,
@@ -76,9 +83,31 @@ pub async fn run<S: MailSource, T: MailStore>(
 
     while !cancelled(cancel) {
         // Full pass (backfill if needed, catch-up, reconcile fallback); this
-        // also re-connects the source after a disconnect.
-        match super::run_backup(source, store, policy, options, cancel).await {
+        // also re-connects the source after a disconnect. Each pass is a
+        // root trace of its own.
+        let span = info_span!(
+            parent: None,
+            "daemon.backup",
+            policy = %name,
+            source = %policy.from,
+            store = %policy.to,
+            dry_run = options.dry_run,
+            concurrency = options.concurrency,
+            added = EmptyField,
+            moved = EmptyField,
+            updated = EmptyField,
+            removed = EmptyField,
+            unchanged = EmptyField,
+            skipped = EmptyField,
+            interrupted = EmptyField,
+            error = EmptyField,
+        );
+        match super::run_backup(source, store, policy, options, cancel)
+            .instrument(span.clone())
+            .await
+        {
             Ok(summary) => {
+                summary.record_span(&span);
                 if summary.changes() > 0 {
                     info!("Synchronized {}: {}", policy, summary);
                 }
@@ -88,6 +117,7 @@ pub async fn run<S: MailSource, T: MailStore>(
                 backoff = stream_options.reconnect_min;
             }
             Err(e) => {
+                span.record("error", display(&e));
                 warn!(
                     "Synchronization of {} failed: {}; retrying in {:?}",
                     policy, e, backoff
@@ -104,6 +134,7 @@ pub async fn run<S: MailSource, T: MailStore>(
 
         info!("Streaming live changes for {}", policy);
         match stream_phase(
+            name,
             source,
             store,
             policy,
@@ -134,7 +165,9 @@ pub async fn run<S: MailSource, T: MailStore>(
 /// Consumes the source's event stream, debouncing notifications into batched
 /// syncs, until the stream ends, a shutdown is requested, or a full
 /// reconciliation becomes necessary.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_phase<S: MailSource, T: MailStore>(
+    name: &str,
     source: &S,
     store: &mut T,
     policy: &BackupPolicy,
@@ -174,14 +207,47 @@ pub(crate) async fn stream_phase<S: MailSource, T: MailStore>(
                 next_safety_poll = next_poll_instant(schedule, stream_options);
             }
 
-            match run_sync(source, store, policy, options, cancel).await {
-                Ok(_) => {
+            // Each applied batch is a time-bound operation and gets its own
+            // root trace, tagged with what prompted it.
+            let trigger = if !due {
+                "schedule"
+            } else if disconnected {
+                "flush"
+            } else {
+                "notification"
+            };
+            let span = info_span!(
+                parent: None,
+                "daemon.sync",
+                policy = %name,
+                trigger,
+                source = %policy.from,
+                store = %policy.to,
+                dry_run = options.dry_run,
+                concurrency = options.concurrency,
+                schedule = schedule.map(display),
+                added = EmptyField,
+                moved = EmptyField,
+                updated = EmptyField,
+                removed = EmptyField,
+                unchanged = EmptyField,
+                skipped = EmptyField,
+                interrupted = EmptyField,
+                error = EmptyField,
+            );
+            match run_sync(source, store, policy, options, cancel)
+                .instrument(span.clone())
+                .await
+            {
+                Ok(summary) => {
+                    summary.record_span(&span);
                     pending = false;
                     quiet_deadline = None;
                     batch_deadline = None;
                 }
                 Err(SyncFailure::NeedsReconcile) => return StreamEnd::NeedsReconcile,
                 Err(SyncFailure::Error(e)) => {
+                    span.record("error", display(&e));
                     warn!("Applying live changes for {} failed: {}", policy, e);
                     return StreamEnd::Disconnected;
                 }
@@ -374,6 +440,7 @@ mod tests {
         });
 
         let end = stream_phase(
+            "test",
             &source,
             &mut store,
             &policy(),
@@ -398,6 +465,7 @@ mod tests {
         store.open().await.unwrap();
 
         let end = stream_phase(
+            "test",
             &source,
             &mut store,
             &policy(),
@@ -434,6 +502,7 @@ mod tests {
         let options = EngineOptions::default();
         let stream_options = fast_stream_options();
         let daemon = run(
+            "test",
             &mut source,
             &mut store,
             &policy,

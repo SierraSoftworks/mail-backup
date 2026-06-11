@@ -70,16 +70,18 @@ async fn run(cli: Cli, session: &Session) -> Result<(), Error> {
             let stream_options = engine::stream::StreamOptions::default();
 
             // Each policy gets its own daemon; they run concurrently on this
-            // task and all shut down together on Ctrl+C.
+            // task and all shut down together on Ctrl+C. The daemons hold no
+            // span of their own — each time-bound operation inside the loop
+            // records its own root trace instead.
             let daemons = config.backups.iter().map(|(name, policy)| {
                 let options = options.clone();
                 let stream_options = stream_options.clone();
                 let schedule = config.schedule.as_ref();
                 async move {
-                    let _span = info_span!("daemon.policy", policy = %name).entered();
                     let mut source = sources::jmap::JmapMailSource::from_config(&policy.from);
                     let mut store = stores::AnyStore::from_config(&policy.to);
                     engine::stream::run(
+                        name,
                         &mut source,
                         &mut store,
                         policy,
@@ -145,14 +147,35 @@ async fn run(cli: Cli, session: &Session) -> Result<(), Error> {
             }
 
             for (name, policy) in selected {
-                let _span = info_span!("backup.policy", policy = %name).entered();
-                info!("Backing up '{}' ({})", name, policy);
+                let span = info_span!(
+                    "backup.policy",
+                    policy = %name,
+                    source = %policy.from,
+                    store = %policy.to,
+                    dry_run = options.dry_run,
+                    concurrency = options.concurrency,
+                    added = EmptyField,
+                    moved = EmptyField,
+                    updated = EmptyField,
+                    removed = EmptyField,
+                    unchanged = EmptyField,
+                    skipped = EmptyField,
+                    interrupted = EmptyField,
+                );
+                async {
+                    info!("Backing up '{}' ({})", name, policy);
 
-                let mut source = sources::jmap::JmapMailSource::from_config(&policy.from);
-                let mut store = stores::AnyStore::from_config(&policy.to);
-                let summary =
-                    engine::run_backup(&mut source, &mut store, policy, &options, &CANCEL).await?;
-                info!("Backup of '{}' complete: {}", name, summary);
+                    let mut source = sources::jmap::JmapMailSource::from_config(&policy.from);
+                    let mut store = stores::AnyStore::from_config(&policy.to);
+                    let summary =
+                        engine::run_backup(&mut source, &mut store, policy, &options, &CANCEL)
+                            .await?;
+                    summary.record_span(&Span::current());
+                    info!("Backup of '{}' complete: {}", name, summary);
+                    Ok::<(), Error>(())
+                }
+                .instrument(span)
+                .await?;
 
                 if CANCEL.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
@@ -201,18 +224,47 @@ async fn run(cli: Cli, session: &Session) -> Result<(), Error> {
                 )
             })?;
 
-            let _span = info_span!("restore.policy", policy = %name).entered();
-            info!("Restoring '{}' ({})", name, policy);
-
-            let options = restore::RestoreOptions {
-                at,
-                filter,
+            let span = info_span!(
+                "restore.policy",
+                policy = %name,
+                store = %policy.from,
+                target = %policy.to,
+                at = at.as_deref().map(display),
+                filter = filter.as_deref().map(display),
                 force,
-                dry_run: cli.dry_run,
-            };
+                dry_run = cli.dry_run,
+                dedupe = ?policy.dedupe,
+                selected = EmptyField,
+                imported = EmptyField,
+                skipped_existing = EmptyField,
+                skipped_filter = EmptyField,
+                failed = EmptyField,
+                mailboxes_created = EmptyField,
+            );
+            let summary = async {
+                info!("Restoring '{}' ({})", name, policy);
 
-            let mut target = restore::jmap::JmapRestoreTarget::from_config(&policy.to);
-            let summary = restore::run_restore(&mut target, policy, &options, &CANCEL).await?;
+                let options = restore::RestoreOptions {
+                    at,
+                    filter,
+                    force,
+                    dry_run: cli.dry_run,
+                };
+
+                let mut target = restore::jmap::JmapRestoreTarget::from_config(&policy.to);
+                let summary = restore::run_restore(&mut target, policy, &options, &CANCEL).await?;
+
+                let span = Span::current();
+                span.record("selected", summary.selected);
+                span.record("imported", summary.imported);
+                span.record("skipped_existing", summary.skipped_existing);
+                span.record("skipped_filter", summary.skipped_filter);
+                span.record("failed", summary.failed);
+                span.record("mailboxes_created", summary.mailboxes_created);
+                Ok::<_, Error>(summary)
+            }
+            .instrument(span)
+            .await?;
             info!("{}", summary);
 
             if summary.failed > 0 {
@@ -285,16 +337,31 @@ async fn run(cli: Cli, session: &Session) -> Result<(), Error> {
             }
 
             for (root, state_dir) in targets {
-                let _span = info_span!("index.rebuild", store = %root.display()).entered();
-                let mut store = stores::dir::DirMailStore::with_state_dir(root.clone(), state_dir);
-                store.open().await?;
-                store.rebuild_index()?;
-                info!(
-                    "Rebuilt the index for {}: {} mailboxes, {} messages",
-                    root.display(),
-                    store.mailboxes().len(),
-                    store.list().count()
+                let span = info_span!(
+                    "index.rebuild",
+                    store = %root.display(),
+                    mailboxes = EmptyField,
+                    messages = EmptyField,
                 );
+                async {
+                    let mut store =
+                        stores::dir::DirMailStore::with_state_dir(root.clone(), state_dir);
+                    store.open().await?;
+                    store.rebuild_index()?;
+
+                    let span = Span::current();
+                    span.record("mailboxes", store.mailboxes().len());
+                    span.record("messages", store.list().count());
+                    info!(
+                        "Rebuilt the index for {}: {} mailboxes, {} messages",
+                        root.display(),
+                        store.mailboxes().len(),
+                        store.list().count()
+                    );
+                    Ok::<(), Error>(())
+                }
+                .instrument(span)
+                .await?;
             }
             Ok(())
         }
@@ -325,27 +392,36 @@ async fn run(cli: Cli, session: &Session) -> Result<(), Error> {
 
             let mut total_issues = 0;
             for target in targets {
-                let _span = info_span!("verify.store", store = %target).entered();
-                let issues = match stores::AnyStore::from_config(&target) {
-                    stores::AnyStore::Git(mut store) => {
-                        store.open().await?;
-                        store.verify()?
-                    }
-                    stores::AnyStore::Dir(mut store) => {
-                        store.open().await?;
-                        store.verify()?
-                    }
-                };
+                let span = info_span!(
+                    "verify.store",
+                    store = %target,
+                    issues = EmptyField,
+                );
+                total_issues += async {
+                    let issues = match stores::AnyStore::from_config(&target) {
+                        stores::AnyStore::Git(mut store) => {
+                            store.open().await?;
+                            store.verify()?
+                        }
+                        stores::AnyStore::Dir(mut store) => {
+                            store.open().await?;
+                            store.verify()?
+                        }
+                    };
 
-                if issues.is_empty() {
-                    info!("{}: consistent", target);
-                } else {
-                    total_issues += issues.len();
-                    warn!("{}: {} inconsistencies found", target, issues.len());
-                    for issue in issues {
-                        warn!(" - {}", issue);
+                    Span::current().record("issues", issues.len());
+                    if issues.is_empty() {
+                        info!("{}: consistent", target);
+                    } else {
+                        warn!("{}: {} inconsistencies found", target, issues.len());
+                        for issue in issues.iter() {
+                            warn!(" - {}", issue);
+                        }
                     }
+                    Ok::<usize, Error>(issues.len())
                 }
+                .instrument(span)
+                .await?;
             }
 
             if total_issues > 0 {

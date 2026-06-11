@@ -13,6 +13,13 @@ use crate::entities::mail::{DateRange, MessageMeta, SourceState};
 use crate::sources::MailSource;
 use crate::stores::{BackfillCursor, Checkpoint, MailStore, SnapshotKind};
 
+#[instrument(name = "backfill", skip_all, fields(
+    source = %policy.from,
+    store = %policy.to,
+    resumed = EmptyField,
+    start_day = EmptyField,
+    processed = EmptyField,
+))]
 pub async fn run<S: MailSource, T: MailStore>(
     source: &S,
     store: &mut T,
@@ -38,6 +45,7 @@ pub async fn run<S: MailSource, T: MailStore>(
             ..Default::default()
         });
 
+    Span::current().record("resumed", cursor.last_committed_day.is_some());
     if let Some(day) = cursor.last_committed_day {
         info!(
             "Resuming backfill after {} ({} messages so far)",
@@ -69,6 +77,9 @@ pub async fn run<S: MailSource, T: MailStore>(
         .last_committed_day
         .and_then(|d| d.succ_opt())
         .or(policy.backfill_start);
+    if let Some(day) = start_day {
+        Span::current().record("start_day", display(day));
+    }
     let range = DateRange {
         start: start_day.map(|d| {
             d.and_hms_opt(0, 0, 0)
@@ -84,9 +95,8 @@ pub async fn run<S: MailSource, T: MailStore>(
 
     {
         use crate::telemetry::StreamExt as _;
-        let stream = source
-            .enumerate(range, cancel)
-            .trace(info_span!("backfill.enumerate"));
+        let span = info_span!("backfill.enumerate", start = range.start.map(display));
+        let stream = source.enumerate(range, cancel).trace(span);
         tokio::pin!(stream);
 
         while let Some(meta) = stream.next().await {
@@ -137,6 +147,8 @@ pub async fn run<S: MailSource, T: MailStore>(
         .await?;
     }
 
+    Span::current().record("processed", cursor.processed);
+
     if interrupted || cancelled(cancel) {
         info!("Backfill interrupted; progress is saved and it will resume on the next run");
         summary.interrupted = true;
@@ -160,6 +172,13 @@ pub async fn run<S: MailSource, T: MailStore>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[instrument(name = "backfill.day", skip_all, fields(
+    day = %day,
+    messages = metas.len(),
+    stored = EmptyField,
+    skipped = EmptyField,
+    unchanged = EmptyField,
+))]
 async fn finalize_day<S: MailSource, T: MailStore>(
     source: &S,
     store: &mut T,
@@ -171,23 +190,30 @@ async fn finalize_day<S: MailSource, T: MailStore>(
     cursor: &mut crate::stores::BackfillCursor,
     summary: &mut BackupSummary,
 ) -> Result<(), human_errors::Error> {
-    let _span = info_span!("backfill.day", day = %day, messages = metas.len()).entered();
-
     let anchor = metas.last().map(|m| m.id.clone());
     let total = metas.len() as u64;
 
+    let mut skipped = 0usize;
+    let mut unchanged = 0usize;
     let mut to_fetch = Vec::new();
     for meta in metas {
         if !matches_filter(policy, store, &meta)? {
-            summary.skipped += 1;
+            skipped += 1;
             continue;
         }
         if store.lookup(&meta.id).is_some() {
-            summary.unchanged += 1;
+            unchanged += 1;
             continue;
         }
         to_fetch.push(meta);
     }
+    summary.skipped += skipped;
+    summary.unchanged += unchanged;
+
+    let span = Span::current();
+    span.record("stored", to_fetch.len());
+    span.record("skipped", skipped);
+    span.record("unchanged", unchanged);
 
     if options.dry_run {
         info!(
