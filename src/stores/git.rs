@@ -84,12 +84,14 @@ impl GitMailStore {
         }
     }
 
-    /// Initializes a brand-new repository: local configuration which protects
-    /// the raw mail bytes from line-ending mangling, plus an initial commit
-    /// holding `.gitattributes` so the protection travels with clones.
-    fn initialize_repository(&mut self) -> Result<(), human_errors::Error> {
-        let repo = self.repo();
-        let config_path = repo.path().join("config");
+    /// Applies an update to the repository's local configuration *file*.
+    /// Callers must [`Self::reload_repository`] afterwards — the open
+    /// repository handle keeps the configuration it was opened with.
+    fn update_config(
+        &self,
+        update: impl FnOnce(&mut gix::config::File<'static>) -> Result<(), human_errors::Error>,
+    ) -> Result<(), human_errors::Error> {
+        let config_path = self.repo().path().join("config");
         let mut config = gix::config::File::from_path_no_includes(
             config_path.clone(),
             gix::config::Source::Local,
@@ -99,25 +101,7 @@ impl GitMailStore {
             &["Make sure that the git repository has been correctly initialized."],
         )?;
 
-        for (section, key, value) in [
-            ("user", "name", self.commit_name.as_str()),
-            ("user", "email", self.commit_email.as_str()),
-            // The raw .eml bytes must never be rewritten by git's line-ending
-            // conversion, no matter what the user's global config says.
-            ("core", "autocrlf", "false"),
-            ("core", "eol", "lf"),
-            // Mailbox names can produce deep paths on Windows.
-            ("core", "longpaths", "true"),
-            // Don't let a user-invoked git trigger gc while we hold the repo.
-            ("gc", "auto", "0"),
-        ] {
-            config
-                .set_raw_value_by(section, None::<&BStr>, key, value)
-                .wrap_system_err(
-                    "Unable to update the git configuration for the backup repository.",
-                    &["Make sure that the git repository has been correctly initialized."],
-                )?;
-        }
+        update(&mut config)?;
 
         let mut file = std::fs::File::create(&config_path).wrap_system_err(
             "Unable to write the git configuration for the backup repository.",
@@ -128,6 +112,79 @@ impl GitMailStore {
             &["Make sure that the git repository is writable by the process."],
         )?;
 
+        Ok(())
+    }
+
+    /// Re-opens the repository so configuration written to disk becomes
+    /// visible to this handle.
+    fn reload_repository(&mut self) -> Result<(), human_errors::Error> {
+        self.repo = Some(gix::open(self.inner.root()).map_err(humanize_git)?);
+        Ok(())
+    }
+
+    /// Initializes a brand-new repository: local configuration which protects
+    /// the raw mail bytes from line-ending mangling, plus an initial commit
+    /// holding `.gitattributes` so the protection travels with clones.
+    fn initialize_repository(&mut self) -> Result<(), human_errors::Error> {
+        let commit_name = self.commit_name.clone();
+        let commit_email = self.commit_email.clone();
+        self.update_config(move |config| {
+            for (section, key, value) in [
+                ("user", "name", commit_name.as_str()),
+                ("user", "email", commit_email.as_str()),
+                // The raw .eml bytes must never be rewritten by git's
+                // line-ending conversion, no matter what the user's global
+                // config says.
+                ("core", "autocrlf", "false"),
+                ("core", "eol", "lf"),
+                // Mailbox names can produce deep paths on Windows.
+                ("core", "longpaths", "true"),
+                // Don't let a user-invoked git trigger gc while we hold the
+                // repo.
+                ("gc", "auto", "0"),
+            ] {
+                config
+                    .set_raw_value_by(section, None::<&BStr>, key, value)
+                    .wrap_system_err(
+                        "Unable to update the git configuration for the backup repository.",
+                        &["Make sure that the git repository has been correctly initialized."],
+                    )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Guarantees the repository can resolve a committer identity, which
+    /// reflog writes (every amend) require. Pre-existing repositories on
+    /// machines without a global git identity have none, so persist a
+    /// fallback — the same mechanism github-backup uses.
+    fn ensure_committer(&mut self) -> Result<(), human_errors::Error> {
+        if self.repo().committer().is_none() {
+            let commit_name = self.commit_name.clone();
+            let commit_email = self.commit_email.clone();
+            self.update_config(move |config| {
+                config
+                    .set_raw_value(
+                        gix::config::tree::gitoxide::Committer::NAME_FALLBACK,
+                        commit_name.as_str(),
+                    )
+                    .wrap_system_err(
+                        "Unable to update the git configuration for the backup repository.",
+                        &["Make sure that the git repository has been correctly initialized."],
+                    )?;
+                config
+                    .set_raw_value(
+                        gix::config::tree::gitoxide::Committer::EMAIL_FALLBACK,
+                        commit_email.as_str(),
+                    )
+                    .wrap_system_err(
+                        "Unable to update the git configuration for the backup repository.",
+                        &["Make sure that the git repository has been correctly initialized."],
+                    )?;
+                Ok(())
+            })?;
+            self.reload_repository()?;
+        }
         Ok(())
     }
 
@@ -412,7 +469,9 @@ impl MailStore for GitMailStore {
 
         if fresh {
             self.initialize_repository()?;
+            self.reload_repository()?;
         }
+        self.ensure_committer()?;
         self.ensure_initial_commit()?;
 
         self.inner.open_without_index()?;
