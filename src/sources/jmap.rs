@@ -411,6 +411,21 @@ impl MailSource for JmapMailSource {
                         // than tearing it down and re-syncing.
                         yield Ok(SourceNotification::Ping);
                     }
+                    Err(e) if matches!(e, jmap_client::Error::Parse(_)) => {
+                        // The server pushed an event payload jmap-client
+                        // couldn't decode — notably, Fastmail omits the
+                        // "@type" member (RFC 8620 §7.1) from its EventSource
+                        // StateChange payloads, which jmap-client requires.
+                        // Notifications are only hints, so treat it as
+                        // "something changed" and let the state-driven sync
+                        // work out what, rather than tearing down a healthy
+                        // stream.
+                        debug!("Treating an undecodable push event as a change hint: {}", e);
+                        yield Ok(SourceNotification::Changed {
+                            email: true,
+                            mailbox: true,
+                        });
+                    }
                     Err(e) => {
                         yield Err(e.to_human_error());
                         break;
@@ -879,6 +894,48 @@ mod tests {
         assert!(
             notifications.contains(&SourceNotification::Ping),
             "keep-alive artifacts become pings: {notifications:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_stream_treats_untagged_state_changes_as_change_hints() {
+        let server = MockServer::start().await;
+        mock_session(&server).await;
+
+        // Fastmail's EventSource StateChange payloads omit the "@type"
+        // member which jmap-client's tagged PushObject enum requires, so the
+        // payload fails to decode. The failure must surface as a
+        // conservative change hint — not as a stream error which tears down
+        // the connection.
+        let body = concat!(
+            "event: state\nid: 60\n",
+            "data: {\"changed\":{\"acc-primary\":{\"Email\":\"es-9\",\"Mailbox\":\"ms-9\",\"Thread\":\"ts-9\"}}}\n\n",
+        );
+        Mock::given(method("GET"))
+            .and(path("/eventsource/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(body.as_bytes(), "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let (source, _) = connected_source(&server, None).await;
+        let cancel = AtomicBool::new(false);
+        let stream = source.events(&cancel);
+        tokio::pin!(stream);
+
+        let mut notifications = Vec::new();
+        while let Some(item) = stream.next().await {
+            notifications.push(item.expect("undecodable payloads must not surface as errors"));
+        }
+
+        assert_eq!(
+            notifications,
+            vec![SourceNotification::Changed {
+                email: true,
+                mailbox: true
+            }],
+            "an undecodable push payload becomes a conservative change hint"
         );
     }
 
