@@ -1,0 +1,57 @@
+<svg viewBox="0 0 620 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="mail-backup logo with wordmark">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F7F7F7"/>
+      <stop offset="1" stop-color="#E2E2E2"/>
+    </linearGradient>
+    <linearGradient id="flap" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#DEDEDE"/>
+      <stop offset="1" stop-color="#C0C0C0"/>
+    </linearGradient>
+    <linearGradient id="frame" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#484B51"/>
+      <stop offset="1" stop-color="#2C2E33"/>
+    </linearGradient>
+    <linearGradient id="git" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F2643F"/>
+      <stop offset="1" stop-color="#E5401C"/>
+    </linearGradient>
+    <clipPath id="env"><rect x="34" y="68" width="188" height="124" rx="22"/></clipPath>
+    <filter id="soft" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDev="3.6"/></filter>
+    <filter id="softlg" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDev="5"/></filter>
+  </defs>
+
+  <g transform="translate(8,16) scale(0.66)">
+    <g clip-path="url(#env)">
+      <path d="M34,90 Q34,68 56,68 L128,150 L200,68 Q222,68 222,90 L222,170 Q222,192 200,192 L56,192 Q34,192 34,170 Z" fill="url(#body)"/>
+      <path d="M56,68 L200,68 L128,150 Z" fill="url(#flap)"/>
+      <g clip-path="url(#env)">
+        <path d="M56,74 L200,74 L128,156 Z" fill="#1A1C20" opacity="0.26" filter="url(#softlg)"/>
+        <path d="M56,68 L200,68 L128,150 Z" fill="url(#flap)"/>
+      </g>
+      <path d="M34,90 Q34,68 56,68 L128,150 L200,68 Q222,68 222,90 L222,170 Q222,192 200,192 L56,192 Q34,192 34,170 Z"
+            fill="none" stroke="url(#frame)" stroke-width="15" stroke-linejoin="round"/>
+    </g>
+    <g transform="translate(194,170)">
+      <g transform="rotate(45)">
+        <rect x="-40" y="-34" width="80" height="80" rx="18" fill="#000000" opacity="0.22" filter="url(#soft)"/>
+      </g>
+      <g transform="rotate(45)">
+        <rect x="-40" y="-40" width="80" height="80" rx="18" fill="url(#git)" stroke="#FFFFFF" stroke-width="9"/>
+        <g transform="scale(1.8)" fill="none" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M -7 -8 V 8"/>
+          <path d="M 7 -8 V -3 Q 7 2 -7 2"/>
+        </g>
+        <g transform="scale(1.8)" fill="#FFFFFF">
+          <circle cx="-7" cy="-8" r="2.8"/>
+          <circle cx="-7" cy="8" r="2.8"/>
+          <circle cx="7" cy="-8" r="2.8"/>
+        </g>
+      </g>
+    </g>
+  </g>
+
+  <text x="210" y="118" font-family="'SF Mono','JetBrains Mono',Menlo,Consolas,monospace" font-size="54" font-weight="700">
+    <tspan fill="#2C2E33">mail</tspan><tspan fill="#E5401C">-backup</tspan>
+  </text>
+</svg>

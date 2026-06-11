@@ -1,0 +1,53 @@
+# The cron schedule on which periodic reconciliation runs. When running as a
+# daemon (`mail-backup run`) this acts as a safety net which catches anything
+# the real-time event stream missed; for one-shot mode (`mail-backup backup`)
+# it controls how often the backup loop repeats.
+schedule: "0 6 * * *"
+
+# Backup policies are keyed by a name of your choosing, which is used to
+# select them on the command line (`mail-backup backup --policy personal`)
+# and in log output.
+backups:
+  # Back up everything from a Fastmail account into a local git repository,
+  # excluding anything marked as junk.
+  personal:
+    from: !Fastmail
+      # Create an API token at https://app.fastmail.com/settings/security/tokens
+      # (read-only access is sufficient for backups).
+      token: fmu1-xxxxxxxx-xxxxxxxxxxxxxxxx
+      # Optionally select a specific account if your session exposes several.
+      account: user@example.com
+    to: !LocalGit
+      path: /backup/mail/personal
+      # Optionally override the git committer identity used for snapshots.
+      commit_name: mail-backup
+      commit_email: mail-backup@example.com
+    filter: '!(message.keywords contains "$junk")'
+    # Optionally limit how far back the initial backfill reaches.
+    backfill_start: 2008-01-01
+
+  # Back up recent mail from any other JMAP provider into a plain directory.
+  # The URL is the server's base URL; the standard /.well-known/jmap session
+  # resource is resolved from it.
+  work:
+    from: !Jmap
+      url: https://jmap.example.com
+      token: xxxxxxxx
+    to: !LocalDir
+      path: /backup/mail/work
+    filter: message.received > "2024-01-01"
+
+restores:
+  # Used by `mail-backup restore`. When exactly one restore policy is
+  # configured it is used by default; otherwise choose one with
+  # `--policy <name>`.
+  personal:
+    from: !LocalGit
+      path: /backup/mail/personal
+    to: !Fastmail
+      token: fmu1-yyyyyyyy-yyyyyyyyyyyyyyyy
+    filter: message.received > "2026-01-01"
+    # Skip messages which already exist on the target server (by Message-ID).
+    dedupe: message-id
+    # Optionally restore into a subfolder rather than the top level.
+    # mailbox_prefix: Restored

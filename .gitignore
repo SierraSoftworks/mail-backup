@@ -1,0 +1,5 @@
+/target
+/backups
+/.direnv
+/result
+.idea/

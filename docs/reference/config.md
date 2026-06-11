@@ -1,0 +1,93 @@
+# Configuration
+Mail Backup reads a single YAML configuration file (default `config.yaml`, override with
+`--config`). It contains an optional schedule plus any number of backup and restore
+policies, each keyed by a name of your choosing — the name selects the policy on the
+command line (`--policy personal`) and identifies it in log output.
+
+```yaml
+schedule: "0 6 * * *"
+
+backups:
+  personal:
+    from: !Fastmail
+      token: fmu1-xxxxxxxx-xxxxxxxxxxxxxxxx
+      account: user@example.com
+    to: !LocalGit
+      path: /backups/mail/personal
+      commit_name: mail-backup
+      commit_email: mail-backup@example.com
+    filter: '!(message.keywords contains "$junk")'
+    backfill_start: 2008-01-01
+
+restores:
+  personal:
+    from: !LocalGit
+      path: /backups/mail/personal
+    to: !Fastmail
+      token: fmu1-yyyyyyyy-yyyyyyyyyyyyyyyy
+    filter: message.received > "2026-01-01"
+    dedupe: message-id
+    mailbox_prefix: Restored
+```
+
+## `schedule`
+A cron expression controlling how often a periodic reconciliation runs. For the daemon
+(`run`) this is a safety net alongside the real-time stream; when omitted, a 6-hour
+default applies.
+
+## Sources (`from:` in backups, `to:` in restores)
+Sources describe a mail account, written as YAML tagged values. Credentials are part of
+the source itself.
+
+### `!Fastmail`
+| Field | Required | Description |
+|---|---|---|
+| `token` | yes | A Fastmail API token. Read-only scope suffices for backups; restores need write access. |
+| `account` | no | Selects an account by id or email address when the token can access several. Defaults to the primary mail account. |
+
+### `!Jmap`
+Any other JMAP (RFC 8620/8621) provider.
+
+| Field | Required | Description |
+|---|---|---|
+| `url` | yes | The server's base URL; the standard `/.well-known/jmap` session resource is resolved from it. |
+| `token` | yes | A bearer token with mail access. |
+| `account` | no | As for `!Fastmail`. |
+
+## Stores (`to:` in backups, `from:` in restores)
+
+### `!LocalGit`
+A local git repository receiving one commit per day of mail. Created and initialized
+automatically on first use.
+
+| Field | Required | Description |
+|---|---|---|
+| `path` | yes | The repository's location on disk. |
+| `commit_name` | no | Git author/committer name (default `mail-backup`). |
+| `commit_email` | no | Git author/committer email. |
+
+### `!LocalDir`
+A plain directory tree with the same layout, but no version history.
+
+| Field | Required | Description |
+|---|---|---|
+| `path` | yes | The directory's location on disk. |
+
+## Backup policy fields
+
+| Field | Required | Description |
+|---|---|---|
+| `from` | yes | The mail account to back up. |
+| `to` | yes | The store to back it up into. Each store holds exactly one account. |
+| `filter` | no | Which messages to archive (default: everything). See [Filters](../advanced/filters.md). |
+| `backfill_start` | no | The earliest day of mail (by received date) the initial backfill reaches back to. |
+
+## Restore policy fields
+
+| Field | Required | Description |
+|---|---|---|
+| `from` | yes | The store to restore from. |
+| `to` | yes | The mail account to restore into. |
+| `filter` | no | Which archived messages to restore (default: everything). |
+| `dedupe` | no | `message-id` (default) skips messages already on the target; `none` imports everything. |
+| `mailbox_prefix` | no | Restore mailboxes underneath this folder rather than at the account's top level. |
