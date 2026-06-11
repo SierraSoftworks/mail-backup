@@ -1,0 +1,36 @@
+# Runs Mail Backup as a long-lived daemon on a server.
+#
+#   1. Put your configuration in ./config.yaml (see examples/config.yaml);
+#      point the stores at paths under /backups, e.g.
+#
+#        backups:
+#          personal:
+#            from: !Fastmail
+#              token: fmu1-xxxxxxxx-xxxxxxxxxxxxxxxx
+#            to: !LocalGit
+#              path: /backups/personal
+#
+#   2. docker compose up -d
+#   3. docker compose logs -f mail-backup
+#
+# The daemon backfills your mail history on first start (this can take a
+# while for large mailboxes and is safe to interrupt), then streams changes
+# from the server in real time.
+
+services:
+  mail-backup:
+    image: ghcr.io/sierrasoftworks/mail-backup:latest
+    restart: unless-stopped
+    command: ["run", "--config", "/config.yaml"]
+    volumes:
+      - ./config.yaml:/config.yaml:ro
+      - ./backups:/backups
+    # Give the daemon time to finish its in-flight batch, commit, and save
+    # its state when stopping; anything harsher is still safe (the next
+    # start resumes idempotently) but produces avoidable re-work.
+    stop_grace_period: 30s
+
+    # To export OpenTelemetry traces, configure an OTLP endpoint:
+    # environment:
+    #   OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io:443"
+    #   OTEL_EXPORTER_OTLP_HEADERS: "x-honeycomb-team=your-api-key"

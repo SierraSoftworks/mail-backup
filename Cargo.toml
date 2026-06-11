@@ -12,7 +12,9 @@ async-stream = "0.3.6"
 chrono = { version = "0.4.44", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive", "string"] }
 croner = "3.0.1"
-ctrlc = "3.5.2"
+# The termination feature extends the shutdown handler to SIGTERM/SIGHUP,
+# which is how Docker and systemd stop the daemon.
+ctrlc = { version = "3.5.2", features = ["termination"] }
 futures = "0.3.31"
 gix = { version = "0.84.0", features = ["tree-editor"] }
 human-errors = { version = "0.2.3", features = ["pretty"] }

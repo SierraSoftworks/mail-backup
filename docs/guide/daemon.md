@@ -59,12 +59,41 @@ WantedBy=multi-user.target
 ```
 
 ## Running in Docker
+The recommended server setup is Docker Compose — the repository ships a ready-to-use
+[`docker-compose.yaml`](https://github.com/SierraSoftworks/mail-backup/blob/main/docker-compose.yaml):
+
+```yaml
+services:
+  mail-backup:
+    image: ghcr.io/sierrasoftworks/mail-backup:latest
+    restart: unless-stopped
+    command: ["run", "--config", "/config.yaml"]
+    volumes:
+      - ./config.yaml:/config.yaml:ro
+      - ./backups:/backups
+    # Give the daemon time to checkpoint cleanly when stopping.
+    stop_grace_period: 30s
+```
+
+Place your `config.yaml` next to it (with stores pointing at paths under `/backups`),
+then:
+
+```bash
+docker compose up -d
+docker compose logs -f mail-backup
+```
+
+Stopping the container sends `SIGTERM`, which the daemon treats exactly like `Ctrl+C`:
+it finishes the in-flight batch, commits, and saves its state before exiting.
+
+A plain `docker run` works too:
 
 ```bash
 docker run -d \
   --name mail-backup \
   --restart unless-stopped \
-  -v $(pwd)/config.yaml:/config.yaml \
+  --stop-timeout 30 \
+  -v $(pwd)/config.yaml:/config.yaml:ro \
   -v $(pwd)/backups:/backups \
   ghcr.io/sierrasoftworks/mail-backup:latest \
   run --config /config.yaml
