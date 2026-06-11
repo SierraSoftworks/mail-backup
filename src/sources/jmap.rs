@@ -906,10 +906,16 @@ mod tests {
         // member which jmap-client's tagged PushObject enum requires, so the
         // payload fails to decode. The failure must surface as a
         // conservative change hint — not as a stream error which tears down
-        // the connection.
+        // the connection. This body replays a wire capture from
+        // api.fastmail.com (2026-06-11, account id redacted): a comment
+        // keep-alive on connect, the untagged state snapshot (with its
+        // non-standard "type" member), and the non-standard "close" event
+        // whose payload also fails to decode.
         let body = concat!(
-            "event: state\nid: 60\n",
-            "data: {\"changed\":{\"acc-primary\":{\"Email\":\"es-9\",\"Mailbox\":\"ms-9\",\"Thread\":\"ts-9\"}}}\n\n",
+            ": new event source connection\r\n\r\n",
+            "event: state\r\nid: 81929\r\n",
+            "data: {\"changed\":{\"uXXXXXXXX\":{\"Mailbox\":\"J81923\",\"Thread\":\"J81923\",\"Email\":\"J81923\",\"EmailDelivery\":\"J81923\"}},\"type\":\"connect\"}\r\n\r\n",
+            "event: close\r\ndata: {}\r\n\r\n",
         );
         Mock::given(method("GET"))
             .and(path("/eventsource/"))
@@ -931,11 +937,21 @@ mod tests {
 
         assert_eq!(
             notifications,
-            vec![SourceNotification::Changed {
-                email: true,
-                mailbox: true
-            }],
-            "an undecodable push payload becomes a conservative change hint"
+            vec![
+                // The connect keep-alive comment's empty dispatch artifact.
+                SourceNotification::Ping,
+                // The untagged state snapshot.
+                SourceNotification::Changed {
+                    email: true,
+                    mailbox: true
+                },
+                // The non-standard "close" event's undecodable {} payload.
+                SourceNotification::Changed {
+                    email: true,
+                    mailbox: true
+                },
+            ],
+            "the captured Fastmail session yields hints, never errors"
         );
     }
 
