@@ -27,6 +27,18 @@ pub struct SyncOutcome {
 /// Applies every change the server reports since our last synchronized state.
 /// New mail received on earlier days is committed day-by-day (backdated);
 /// everything else lands in today's live snapshot.
+#[instrument(name = "sync.changes", skip_all, fields(
+    source = %policy.from,
+    store = %policy.to,
+    created = EmptyField,
+    updated = EmptyField,
+    destroyed = EmptyField,
+    mailboxes_changed = EmptyField,
+    needs_reconcile = EmptyField,
+    plan.adds = EmptyField,
+    plan.updates = EmptyField,
+    plan.deletes = EmptyField,
+))]
 pub async fn run<S: MailSource, T: MailStore>(
     source: &S,
     store: &mut T,
@@ -34,8 +46,6 @@ pub async fn run<S: MailSource, T: MailStore>(
     options: &EngineOptions,
     cancel: &AtomicBool,
 ) -> Result<SyncOutcome, human_errors::Error> {
-    let _span = info_span!("sync.changes").entered();
-
     let mut created = Vec::new();
     let mut updated = Vec::new();
     let mut destroyed = Vec::new();
@@ -55,6 +65,7 @@ pub async fn run<S: MailSource, T: MailStore>(
 
         match source.changes(&state).await? {
             ChangesResult::StateTooOld => {
+                Span::current().record("needs_reconcile", true);
                 return Ok(SyncOutcome {
                     summary: BackupSummary::default(),
                     needs_reconcile: true,
@@ -74,6 +85,12 @@ pub async fn run<S: MailSource, T: MailStore>(
     }
 
     let (created, updated, destroyed) = dedupe_changes(created, updated, destroyed);
+
+    let span = Span::current();
+    span.record("created", created.len());
+    span.record("updated", updated.len());
+    span.record("destroyed", destroyed.len());
+    span.record("mailboxes_changed", mailboxes_changed);
 
     let mut summary = BackupSummary::default();
     let mut plan = PlannedChanges::default();
@@ -95,6 +112,10 @@ pub async fn run<S: MailSource, T: MailStore>(
         &mut summary,
     )?;
     plan.deletes.extend(destroyed);
+
+    span.record("plan.adds", plan.adds.len());
+    span.record("plan.updates", plan.updates.len());
+    span.record("plan.deletes", plan.deletes.len());
 
     if plan.is_empty() && state == store.state().source {
         debug!("No changes since the last synchronization");
@@ -121,6 +142,14 @@ pub async fn run<S: MailSource, T: MailStore>(
 /// Fully re-enumerates the server and diffs against the store, without
 /// re-downloading content for messages we already hold (a message id's
 /// content is immutable; only keywords and mailbox membership change).
+#[instrument(name = "sync.reconcile", skip_all, fields(
+    source = %policy.from,
+    store = %policy.to,
+    enumerated = EmptyField,
+    plan.adds = EmptyField,
+    plan.updates = EmptyField,
+    plan.deletes = EmptyField,
+))]
 pub async fn reconcile<S: MailSource, T: MailStore>(
     source: &S,
     store: &mut T,
@@ -129,8 +158,6 @@ pub async fn reconcile<S: MailSource, T: MailStore>(
     cancel: &AtomicBool,
     fresh_state: &SourceState,
 ) -> Result<BackupSummary, human_errors::Error> {
-    let _span = info_span!("sync.reconcile").entered();
-
     let mut summary = BackupSummary::default();
     let mut plan = PlannedChanges::default();
 
@@ -189,6 +216,12 @@ pub async fn reconcile<S: MailSource, T: MailStore>(
             .filter(|stored| !seen.contains(&stored.meta.id))
             .map(|stored| stored.meta.id.clone()),
     );
+
+    let span = Span::current();
+    span.record("enumerated", seen.len());
+    span.record("plan.adds", plan.adds.len());
+    span.record("plan.updates", plan.updates.len());
+    span.record("plan.deletes", plan.deletes.len());
 
     info!(
         "Reconciliation plan: {} new, {} updated, {} deleted",

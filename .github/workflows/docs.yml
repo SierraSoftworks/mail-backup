@@ -1,5 +1,7 @@
 name: Documentation
 
+# The build runs on every pull request (it is a required status check), but
+# the docs are only ever deployed from the main branch.
 on:
   push:
     branches:
@@ -8,17 +10,13 @@ on:
     types: [opened, synchronize, reopened]
     branches:
       - main
-    paths:
-      - docs/**/*
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: pages-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -36,6 +34,8 @@ jobs:
       - name: Build
         run: cd docs && npm run build
       - name: Upload Pages Artifact
+        # The artifact is only consumed by the deployment from main.
+        if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@v5
         with:
           path: docs/.vuepress/dist
@@ -45,6 +45,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     name: Deploy to GitHub Pages
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: "GitHub Pages"
       url: ${{ steps.deployment.outputs.page_url }}

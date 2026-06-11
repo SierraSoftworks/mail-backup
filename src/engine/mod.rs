@@ -91,6 +91,19 @@ impl BackupSummary {
     pub fn changes(&self) -> usize {
         self.added + self.moved + self.updated + self.removed
     }
+
+    /// Records the summary's counters as attributes on a span. The span must
+    /// have declared the matching fields (initially [`EmptyField`]): `added`,
+    /// `moved`, `updated`, `removed`, `unchanged`, `skipped`, `interrupted`.
+    pub fn record_span(&self, span: &Span) {
+        span.record("added", self.added);
+        span.record("moved", self.moved);
+        span.record("updated", self.updated);
+        span.record("removed", self.removed);
+        span.record("unchanged", self.unchanged);
+        span.record("skipped", self.skipped);
+        span.record("interrupted", self.interrupted);
+    }
 }
 
 impl Display for BackupSummary {
