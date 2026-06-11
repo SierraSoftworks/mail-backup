@@ -161,6 +161,25 @@ pub fn is_cannot_calculate_changes(error: &jmap_client::Error) -> bool {
     )
 }
 
+/// Whether an event-stream error is jmap-client's keep-alive parsing
+/// artifact rather than a real failure.
+///
+/// The SSE specification says events with an empty data buffer must be
+/// ignored, but jmap-client's parser dispatches them (comment keep-alives
+/// and blank lines produce one) and then fails to JSON-parse the zero-byte
+/// payload — an EOF at the very first byte. Fastmail sends comment
+/// keep-alives on its event stream, so these arrive regularly on a
+/// perfectly healthy connection.
+pub fn is_keepalive_artifact(error: &jmap_client::Error) -> bool {
+    matches!(
+        error,
+        jmap_client::Error::Parse(e)
+            if e.classify() == serde_json::error::Category::Eof
+                && e.line() == 1
+                && e.column() == 0
+    )
+}
+
 pub fn is_anchor_not_found(error: &jmap_client::Error) -> bool {
     matches!(
         error,

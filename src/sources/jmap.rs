@@ -14,8 +14,8 @@ use crate::entities::mail::{
 };
 use crate::errors::HumanizableError;
 use crate::helpers::jmap::{
-    MailClient, email_to_meta, is_anchor_not_found, is_cannot_calculate_changes, mailbox_to_info,
-    retry,
+    MailClient, email_to_meta, is_anchor_not_found, is_cannot_calculate_changes,
+    is_keepalive_artifact, mailbox_to_info, retry,
 };
 use crate::policy::SourceConfig;
 
@@ -403,6 +403,12 @@ impl MailSource for JmapMailSource {
                         }
                     }
                     Ok(_) => {
+                        yield Ok(SourceNotification::Ping);
+                    }
+                    Err(e) if is_keepalive_artifact(&e) => {
+                        // A keep-alive comment mis-parsed by jmap-client; the
+                        // connection is healthy, so stay on the stream rather
+                        // than tearing it down and re-syncing.
                         yield Ok(SourceNotification::Ping);
                     }
                     Err(e) => {
@@ -820,6 +826,60 @@ mod tests {
         let (source, state) = connected_source(&server, None).await;
         let result = source.changes(&state).await.unwrap();
         assert!(matches!(result, ChangesResult::StateTooOld));
+    }
+
+    #[tokio::test]
+    async fn event_stream_survives_keepalive_comments() {
+        let server = MockServer::start().await;
+        mock_session(&server).await;
+
+        // Comment keep-alives (which Fastmail sends) trip a bug in
+        // jmap-client's SSE parser: it dispatches the resulting empty events
+        // instead of ignoring them, and they fail JSON parsing. They must
+        // surface as pings, not errors, or the daemon tears down a healthy
+        // connection on every keep-alive.
+        let body = concat!(
+            ": connected\n\n",
+            "event: state\nid: e1\ndata: {\"@type\":\"StateChange\",\"changed\":{\"acc-primary\":{\"Email\":\"es-2\"}}}\n\n",
+            ":\n\n",
+            "event: state\ndata: {\"@type\":\"StateChange\",\"changed\":{\"acc-primary\":{\"Mailbox\":\"ms-2\"}}}\n\n",
+        );
+        Mock::given(method("GET"))
+            .and(path("/eventsource/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(body.as_bytes(), "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let (source, _) = connected_source(&server, None).await;
+        let cancel = AtomicBool::new(false);
+        let stream = source.events(&cancel);
+        tokio::pin!(stream);
+
+        let mut notifications = Vec::new();
+        while let Some(item) = stream.next().await {
+            notifications.push(item.expect("keep-alives must not surface as stream errors"));
+        }
+
+        assert!(
+            notifications.contains(&SourceNotification::Changed {
+                email: true,
+                mailbox: false
+            }),
+            "got: {notifications:?}"
+        );
+        assert!(
+            notifications.contains(&SourceNotification::Changed {
+                email: false,
+                mailbox: true
+            }),
+            "got: {notifications:?}"
+        );
+        assert!(
+            notifications.contains(&SourceNotification::Ping),
+            "keep-alive artifacts become pings: {notifications:?}"
+        );
     }
 
     #[tokio::test]
