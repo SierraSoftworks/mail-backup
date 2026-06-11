@@ -37,7 +37,8 @@ restores:
 
  - **Daily snapshots, as git commits.** The initial backfill walks your mail history
    chronologically, committing one backdated snapshot per day; afterwards the daemon
-   streams changes from the server in real time (JMAP EventSource) and amends the current
+   streams changes from the server in real time (JMAP websocket push, EventSource, or
+   state polling — whichever the server supports, in that order) and amends the current
    day's commit as mail arrives.
  - **Full fidelity.** Every message is stored as its raw RFC 5322 bytes (headers and
    attachments included) plus a metadata sidecar capturing all of its mailboxes, keywords

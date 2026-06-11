@@ -10,9 +10,12 @@ In this mode the tool:
 
 1. Performs (or resumes) the initial backfill if it hasn't completed yet.
 2. Runs a changes-based catch-up to bring the archive up to date.
-3. Opens a real-time event stream (JMAP EventSource) to the server and applies changes
-   moments after they happen — new mail, moves between folders, flag changes, and
-   deletions.
+3. Opens a real-time event stream to the server and applies changes moments after they
+   happen — new mail, moves between folders, flag changes, and deletions. The daemon
+   prefers websocket push (RFC 8887) where the server advertises it, falls back to
+   EventSource/SSE, and finally to periodic state polling, so any reachable JMAP server
+   ends up with a working stream. A transport that keeps failing is set aside for a
+   while in favour of the next one, and is tried again later.
 
 ## Daily snapshots and amending
 Each calendar day (UTC) gets exactly one commit. The first change of the day creates the

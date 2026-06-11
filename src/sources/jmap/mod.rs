@@ -3,6 +3,10 @@
 //! Backups are strictly read-only against the server — this source only ever
 //! issues query/get/changes/download requests.
 
+mod events;
+#[cfg(test)]
+pub(crate) mod testing;
+
 use std::sync::atomic::AtomicBool;
 
 use tokio_stream::{Stream, StreamExt};
@@ -14,8 +18,8 @@ use crate::entities::mail::{
 };
 use crate::errors::HumanizableError;
 use crate::helpers::jmap::{
-    MailClient, email_to_meta, is_anchor_not_found, is_cannot_calculate_changes,
-    is_keepalive_artifact, mailbox_to_info, retry,
+    MailClient, email_to_meta, is_anchor_not_found, is_cannot_calculate_changes, mailbox_to_info,
+    retry,
 };
 use crate::policy::SourceConfig;
 
@@ -44,6 +48,9 @@ pub struct JmapMailSource {
     token: String,
     account: Option<String>,
     client: Option<MailClient>,
+    /// Persists across reconnects so strategy failure streaks survive the
+    /// engine's reconnect loop.
+    events: events::StrategyChain,
 }
 
 impl JmapMailSource {
@@ -53,6 +60,7 @@ impl JmapMailSource {
             token: config.token().to_string(),
             account: config.account().map(str::to_string),
             client: None,
+            events: events::StrategyChain::default(),
         }
     }
 
@@ -63,36 +71,6 @@ impl JmapMailSource {
                 &["This is a bug in mail-backup; please report it to us on GitHub."],
             )
         })
-    }
-
-    /// The server's current Email state string (an Email/get with no ids).
-    async fn email_state(&self) -> Result<String, human_errors::Error> {
-        let client = self.client()?;
-        retry("Fetching the mail state", || async {
-            let mut request = client.inner().build();
-            request.get_email().ids(Vec::<String>::new());
-            request
-                .send_single::<jmap_client::core::response::EmailGetResponse>()
-                .await
-                .map(|mut r| r.take_state())
-        })
-        .await
-        .map_err(|e| e.to_human_error())
-    }
-
-    /// The server's current Mailbox state string.
-    async fn mailbox_state(&self) -> Result<String, human_errors::Error> {
-        let client = self.client()?;
-        retry("Fetching the mailbox state", || async {
-            let mut request = client.inner().build();
-            request.get_mailbox().ids(Vec::<String>::new());
-            request
-                .send_single::<jmap_client::core::response::MailboxGetResponse>()
-                .await
-                .map(|mut r| r.take_state())
-        })
-        .await
-        .map_err(|e| e.to_human_error())
     }
 
     /// One page of an Email/query enumeration sorted by receivedAt ascending.
@@ -179,10 +157,11 @@ impl MailSource for JmapMailSource {
         );
         self.client = Some(client);
 
+        let client = self.client()?;
         Ok(SourceState {
-            account_id: self.client()?.account_id().to_string(),
-            email_state: Some(self.email_state().await?),
-            mailbox_state: Some(self.mailbox_state().await?),
+            account_id: client.account_id().to_string(),
+            email_state: Some(client.email_state().await?),
+            mailbox_state: Some(client.mailbox_state().await?),
         })
     }
 
@@ -283,7 +262,7 @@ impl MailSource for JmapMailSource {
         let mailbox_state = match since.mailbox_state.clone() {
             None => {
                 mailboxes_changed = true;
-                Some(self.mailbox_state().await?)
+                Some(client.mailbox_state().await?)
             }
             Some(state) => {
                 let mut current = state;
@@ -310,7 +289,7 @@ impl MailSource for JmapMailSource {
                         }
                         Err(e) if is_cannot_calculate_changes(&e) => {
                             mailboxes_changed = true;
-                            break Some(self.mailbox_state().await?);
+                            break Some(client.mailbox_state().await?);
                         }
                         Err(e) => return Err(e.to_human_error()),
                     }
@@ -365,72 +344,10 @@ impl MailSource for JmapMailSource {
                 }
             };
 
-            let stream = match client
-                .inner()
-                .event_source(
-                    Some(vec![
-                        jmap_client::DataType::Email,
-                        jmap_client::DataType::Mailbox,
-                    ]),
-                    false,
-                    Some(30),
-                    None,
-                )
-                .await
-            {
-                Ok(stream) => stream,
-                Err(e) => {
-                    yield Err(e.to_human_error());
-                    return;
-                }
-            };
-
+            let stream = self.events.events(client, cancel);
             tokio::pin!(stream);
-
-            while let Some(event) = stream.next().await {
-                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-
-                match event {
-                    Ok(jmap_client::event_source::PushNotification::StateChange(changes)) => {
-                        let email = changes.has_type(jmap_client::DataType::Email);
-                        let mailbox = changes.has_type(jmap_client::DataType::Mailbox);
-                        if email || mailbox {
-                            yield Ok(SourceNotification::Changed { email, mailbox });
-                        } else {
-                            yield Ok(SourceNotification::Ping);
-                        }
-                    }
-                    Ok(_) => {
-                        yield Ok(SourceNotification::Ping);
-                    }
-                    Err(e) if is_keepalive_artifact(&e) => {
-                        // A keep-alive comment mis-parsed by jmap-client; the
-                        // connection is healthy, so stay on the stream rather
-                        // than tearing it down and re-syncing.
-                        yield Ok(SourceNotification::Ping);
-                    }
-                    Err(e) if matches!(e, jmap_client::Error::Parse(_)) => {
-                        // The server pushed an event payload jmap-client
-                        // couldn't decode — notably, Fastmail omits the
-                        // "@type" member (RFC 8620 §7.1) from its EventSource
-                        // StateChange payloads, which jmap-client requires.
-                        // Notifications are only hints, so treat it as
-                        // "something changed" and let the state-driven sync
-                        // work out what, rather than tearing down a healthy
-                        // stream.
-                        debug!("Treating an undecodable push event as a change hint: {}", e);
-                        yield Ok(SourceNotification::Changed {
-                            email: true,
-                            mailbox: true,
-                        });
-                    }
-                    Err(e) => {
-                        yield Err(e.to_human_error());
-                        break;
-                    }
-                }
+            while let Some(item) = stream.next().await {
+                yield item;
             }
         }
     }
@@ -438,132 +355,11 @@ impl MailSource for JmapMailSource {
 
 #[cfg(test)]
 mod tests {
+    use super::testing::*;
     use super::*;
     use serde_json::json;
     use wiremock::matchers::{body_string_contains, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn session_json(base: &str) -> serde_json::Value {
-        let mail_capabilities = json!({
-            "maxMailboxesPerEmail": null,
-            "maxMailboxDepth": 10,
-            "maxSizeMailboxName": 200,
-            "maxSizeAttachmentsPerEmail": 50_000_000u64,
-            "emailQuerySortOptions": ["receivedAt"],
-            "mayCreateTopLevelMailbox": true
-        });
-
-        json!({
-            "capabilities": {
-                "urn:ietf:params:jmap:core": {
-                    "maxSizeUpload": 50_000_000u64,
-                    "maxConcurrentUpload": 4,
-                    "maxSizeRequest": 10_000_000u64,
-                    "maxConcurrentRequests": 4,
-                    "maxCallsInRequest": 16,
-                    "maxObjectsInGet": 256,
-                    "maxObjectsInSet": 128,
-                    "collationAlgorithms": []
-                },
-                "urn:ietf:params:jmap:mail": mail_capabilities
-            },
-            "accounts": {
-                "acc-primary": {
-                    "name": "user@example.com",
-                    "isPersonal": true,
-                    "isReadOnly": false,
-                    "accountCapabilities": { "urn:ietf:params:jmap:mail": mail_capabilities }
-                },
-                "acc-other": {
-                    "name": "other@example.com",
-                    "isPersonal": false,
-                    "isReadOnly": false,
-                    "accountCapabilities": { "urn:ietf:params:jmap:mail": mail_capabilities }
-                }
-            },
-            "primaryAccounts": { "urn:ietf:params:jmap:mail": "acc-primary" },
-            "username": "user@example.com",
-            "apiUrl": format!("{base}/api"),
-            "downloadUrl": format!("{base}/download/{{accountId}}/{{blobId}}/{{name}}?accept={{type}}"),
-            "uploadUrl": format!("{base}/upload/{{accountId}}/"),
-            "eventSourceUrl": format!("{base}/eventsource/?types={{types}}&closeafter={{closeafter}}&ping={{ping}}"),
-            "state": "session-1"
-        })
-    }
-
-    fn method_response(name: &str, body: serde_json::Value) -> serde_json::Value {
-        json!({ "methodResponses": [[name, body, "s0"]], "sessionState": "session-1" })
-    }
-
-    /// Matches only requests whose body does NOT contain the given needle.
-    struct BodyNotContains(&'static str);
-
-    impl wiremock::Match for BodyNotContains {
-        fn matches(&self, request: &wiremock::Request) -> bool {
-            !String::from_utf8_lossy(&request.body).contains(self.0)
-        }
-    }
-
-    /// Serves the session document and the Email/get + Mailbox/get state
-    /// probes which `connect()` issues.
-    async fn mock_session(server: &MockServer) {
-        Mock::given(method("GET"))
-            .and(path("/.well-known/jmap"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(session_json(&server.uri())))
-            .mount(server)
-            .await;
-
-        Mock::given(method("POST"))
-            .and(path("/api"))
-            .and(body_string_contains("Email/get"))
-            .and(body_string_contains("\"ids\":[]"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(method_response(
-                "Email/get",
-                json!({ "accountId": "acc-primary", "state": "email-state-1", "list": [], "notFound": [] }),
-            )))
-            .mount(server)
-            .await;
-
-        Mock::given(method("POST"))
-            .and(path("/api"))
-            .and(body_string_contains("Mailbox/get"))
-            .and(body_string_contains("\"ids\":[]"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(method_response(
-                "Mailbox/get",
-                json!({ "accountId": "acc-primary", "state": "mailbox-state-1", "list": [], "notFound": [] }),
-            )))
-            .mount(server)
-            .await;
-    }
-
-    async fn connected_source(
-        server: &MockServer,
-        account: Option<&str>,
-    ) -> (JmapMailSource, SourceState) {
-        let mut source = JmapMailSource {
-            session_url: server.uri(),
-            token: "test-token".to_string(),
-            account: account.map(str::to_string),
-            client: None,
-        };
-        let state = source.connect().await.expect("connect succeeds");
-        (source, state)
-    }
-
-    fn email_json(id: &str, received: &str) -> serde_json::Value {
-        json!({
-            "id": id,
-            "blobId": format!("blob-{id}"),
-            "threadId": format!("thread-{id}"),
-            "mailboxIds": { "mb-inbox": true },
-            "keywords": { "$seen": true },
-            "size": 1234,
-            "receivedAt": received,
-            "messageId": [format!("<{id}@example.com>")],
-            "subject": format!("Subject {id}"),
-            "from": [{ "name": "Sender", "email": "sender@example.com" }]
-        })
-    }
 
     #[tokio::test]
     async fn connect_uses_bearer_token_and_resolves_accounts() {
@@ -598,12 +394,7 @@ mod tests {
         let server = MockServer::start().await;
         mock_session(&server).await;
 
-        let mut source = JmapMailSource {
-            session_url: server.uri(),
-            token: "test-token".to_string(),
-            account: Some("missing@example.com".to_string()),
-            client: None,
-        };
+        let mut source = test_source(&server, "test-token", Some("missing@example.com"));
         let error = source.connect().await.expect_err("unknown account fails");
         assert!(error.to_string().contains("missing@example.com"));
     }
@@ -617,12 +408,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mut source = JmapMailSource {
-            session_url: server.uri(),
-            token: "bad-token".to_string(),
-            account: None,
-            client: None,
-        };
+        let mut source = test_source(&server, "bad-token", None);
         let error = source.connect().await.expect_err("401 fails");
         let message = format!("{error}");
         assert!(
@@ -952,6 +738,51 @@ mod tests {
                 },
             ],
             "the captured Fastmail session yields hints, never errors"
+        );
+    }
+
+    #[tokio::test]
+    async fn events_fall_back_from_websocket_to_sse() {
+        let server = MockServer::start().await;
+
+        // The server advertises websocket push, but its endpoint refuses
+        // connections (nothing listens on port 1); the chain must fall back
+        // to SSE and deliver notifications from there.
+        mock_session_document(
+            &server,
+            session_json_with_websocket(&server.uri(), "ws://127.0.0.1:1", true),
+        )
+        .await;
+        mock_state_probes(&server).await;
+
+        let body = concat!(
+            "event: state\n",
+            "data: {\"@type\":\"StateChange\",\"changed\":{\"acc-primary\":{\"Email\":\"es-2\"}}}\n\n",
+        );
+        Mock::given(method("GET"))
+            .and(path("/eventsource/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(body.as_bytes(), "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let (source, _) = connected_source(&server, None).await;
+        let cancel = AtomicBool::new(false);
+        let stream = source.events(&cancel);
+        tokio::pin!(stream);
+
+        let mut notifications = Vec::new();
+        while let Some(item) = stream.next().await {
+            notifications.push(item.expect("the SSE fallback delivers cleanly"));
+        }
+
+        assert!(
+            notifications.contains(&SourceNotification::Changed {
+                email: true,
+                mailbox: false
+            }),
+            "got: {notifications:?}"
         );
     }
 
