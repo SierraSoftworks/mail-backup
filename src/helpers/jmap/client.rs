@@ -115,6 +115,34 @@ impl MailClient {
         &self.client
     }
 
+    /// The server's current Email state string (an Email/get with no ids).
+    pub async fn email_state(&self) -> Result<String, human_errors::Error> {
+        retry("Fetching the mail state", || async {
+            let mut request = self.client.build();
+            request.get_email().ids(Vec::<String>::new());
+            request
+                .send_single::<jmap_client::core::response::EmailGetResponse>()
+                .await
+                .map(|mut r| r.take_state())
+        })
+        .await
+        .map_err(|e| e.to_human_error())
+    }
+
+    /// The server's current Mailbox state string.
+    pub async fn mailbox_state(&self) -> Result<String, human_errors::Error> {
+        retry("Fetching the mailbox state", || async {
+            let mut request = self.client.build();
+            request.get_mailbox().ids(Vec::<String>::new());
+            request
+                .send_single::<jmap_client::core::response::MailboxGetResponse>()
+                .await
+                .map(|mut r| r.take_state())
+        })
+        .await
+        .map_err(|e| e.to_human_error())
+    }
+
     pub fn account_id(&self) -> &str {
         self.client.default_account_id()
     }

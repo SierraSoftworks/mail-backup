@@ -65,36 +65,6 @@ impl JmapMailSource {
         })
     }
 
-    /// The server's current Email state string (an Email/get with no ids).
-    async fn email_state(&self) -> Result<String, human_errors::Error> {
-        let client = self.client()?;
-        retry("Fetching the mail state", || async {
-            let mut request = client.inner().build();
-            request.get_email().ids(Vec::<String>::new());
-            request
-                .send_single::<jmap_client::core::response::EmailGetResponse>()
-                .await
-                .map(|mut r| r.take_state())
-        })
-        .await
-        .map_err(|e| e.to_human_error())
-    }
-
-    /// The server's current Mailbox state string.
-    async fn mailbox_state(&self) -> Result<String, human_errors::Error> {
-        let client = self.client()?;
-        retry("Fetching the mailbox state", || async {
-            let mut request = client.inner().build();
-            request.get_mailbox().ids(Vec::<String>::new());
-            request
-                .send_single::<jmap_client::core::response::MailboxGetResponse>()
-                .await
-                .map(|mut r| r.take_state())
-        })
-        .await
-        .map_err(|e| e.to_human_error())
-    }
-
     /// One page of an Email/query enumeration sorted by receivedAt ascending.
     async fn query_page(
         &self,
@@ -179,10 +149,11 @@ impl MailSource for JmapMailSource {
         );
         self.client = Some(client);
 
+        let client = self.client()?;
         Ok(SourceState {
-            account_id: self.client()?.account_id().to_string(),
-            email_state: Some(self.email_state().await?),
-            mailbox_state: Some(self.mailbox_state().await?),
+            account_id: client.account_id().to_string(),
+            email_state: Some(client.email_state().await?),
+            mailbox_state: Some(client.mailbox_state().await?),
         })
     }
 
@@ -283,7 +254,7 @@ impl MailSource for JmapMailSource {
         let mailbox_state = match since.mailbox_state.clone() {
             None => {
                 mailboxes_changed = true;
-                Some(self.mailbox_state().await?)
+                Some(client.mailbox_state().await?)
             }
             Some(state) => {
                 let mut current = state;
@@ -310,7 +281,7 @@ impl MailSource for JmapMailSource {
                         }
                         Err(e) if is_cannot_calculate_changes(&e) => {
                             mailboxes_changed = true;
-                            break Some(self.mailbox_state().await?);
+                            break Some(client.mailbox_state().await?);
                         }
                         Err(e) => return Err(e.to_human_error()),
                     }
