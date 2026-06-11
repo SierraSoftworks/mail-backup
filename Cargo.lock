@@ -2793,6 +2793,7 @@ dependencies = [
  "tracing-batteries",
  "unicase",
  "unicode-normalization",
+ "url",
  "wiremock",
 ]
 

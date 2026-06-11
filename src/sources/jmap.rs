@@ -288,8 +288,14 @@ impl MailSource for JmapMailSource {
             Some(state) => {
                 let mut current = state;
                 loop {
-                    match retry("Fetching mailbox changes", || {
-                        client.inner().mailbox_changes(current.clone(), 0)
+                    // Built by hand rather than via the `mailbox_changes`
+                    // convenience method: that method always sends a
+                    // `maxChanges` argument, and RFC 8620 requires it to be a
+                    // *positive* integer when present (Fastmail rejects 0).
+                    match retry("Fetching mailbox changes", || async {
+                        let mut request = client.inner().build();
+                        request.changes_mailbox(current.clone());
+                        request.send_changes_mailbox().await
                     })
                     .await
                     {
@@ -466,6 +472,15 @@ mod tests {
 
     fn method_response(name: &str, body: serde_json::Value) -> serde_json::Value {
         json!({ "methodResponses": [[name, body, "s0"]], "sessionState": "session-1" })
+    }
+
+    /// Matches only requests whose body does NOT contain the given needle.
+    struct BodyNotContains(&'static str);
+
+    impl wiremock::Match for BodyNotContains {
+        fn matches(&self, request: &wiremock::Request) -> bool {
+            !String::from_utf8_lossy(&request.body).contains(self.0)
+        }
     }
 
     /// Serves the session document and the Email/get + Mailbox/get state
@@ -746,9 +761,12 @@ mod tests {
             .mount(&server)
             .await;
 
+        // RFC 8620 forbids `maxChanges: 0`; a request carrying a maxChanges
+        // argument here goes unmatched and fails the test.
         Mock::given(method("POST"))
             .and(path("/api"))
             .and(body_string_contains("Mailbox/changes"))
+            .and(BodyNotContains("maxChanges"))
             .respond_with(ResponseTemplate::new(200).set_body_json(method_response(
                 "Mailbox/changes",
                 json!({

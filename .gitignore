@@ -3,3 +3,6 @@
 /.direnv
 /result
 .idea/
+
+# Local smoke-test configuration (holds a real API token; never commit)
+/examples/smoke-test.yaml

@@ -98,7 +98,8 @@ async fn run(cli: Cli, session: &Session) -> Result<(), Error> {
             for result in results {
                 if let Err((name, e)) = result {
                     failed = true;
-                    error!("The daemon for '{}' failed: {}", name, e);
+                    error!("The daemon for '{}' failed: {}", name, e.description());
+                    eprintln!("{}", human_errors::pretty(&e));
                     session.record_error(&e);
                 }
             }
@@ -377,7 +378,11 @@ async fn main() {
 
     if let Err(e) = result {
         session.record_error(&e);
-        error!("{}", human_errors::pretty(&e));
+        // The tracing entry gets the plain one-line message (ANSI sequences
+        // and box drawing get mangled by the log formatter); the nicely
+        // formatted version goes directly to the console.
+        error!("{}", e.description());
+        eprintln!("{}", human_errors::pretty(&e));
         session.shutdown();
         std::process::exit(1);
     } else {

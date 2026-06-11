@@ -24,8 +24,20 @@ impl MailClient {
         token: &str,
         account: Option<&str>,
     ) -> Result<Self, human_errors::Error> {
-        let client = jmap_client::client::Client::new()
-            .credentials(jmap_client::client::Credentials::bearer(token))
+        let mut builder = jmap_client::client::Client::new()
+            .credentials(jmap_client::client::Credentials::bearer(token));
+
+        // The client only follows redirects to explicitly trusted hosts, and
+        // providers commonly redirect /.well-known/jmap to their session
+        // resource (Fastmail does), so the server's own host must be trusted.
+        if let Some(host) = url::Url::parse(session_url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+        {
+            builder = builder.follow_redirects([host]);
+        }
+
+        let client = builder
             .connect(session_url)
             .await
             .map_err(|e| e.to_human_error())?;
