@@ -742,6 +742,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn events_fall_back_from_websocket_to_sse() {
+        let server = MockServer::start().await;
+
+        // The server advertises websocket push, but its endpoint refuses
+        // connections (nothing listens on port 1); the chain must fall back
+        // to SSE and deliver notifications from there.
+        mock_session_document(
+            &server,
+            session_json_with_websocket(&server.uri(), "ws://127.0.0.1:1", true),
+        )
+        .await;
+        mock_state_probes(&server).await;
+
+        let body = concat!(
+            "event: state\n",
+            "data: {\"@type\":\"StateChange\",\"changed\":{\"acc-primary\":{\"Email\":\"es-2\"}}}\n\n",
+        );
+        Mock::given(method("GET"))
+            .and(path("/eventsource/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(body.as_bytes(), "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let (source, _) = connected_source(&server, None).await;
+        let cancel = AtomicBool::new(false);
+        let stream = source.events(&cancel);
+        tokio::pin!(stream);
+
+        let mut notifications = Vec::new();
+        while let Some(item) = stream.next().await {
+            notifications.push(item.expect("the SSE fallback delivers cleanly"));
+        }
+
+        assert!(
+            notifications.contains(&SourceNotification::Changed {
+                email: true,
+                mailbox: false
+            }),
+            "got: {notifications:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn fetch_blob_downloads_raw_bytes() {
         let server = MockServer::start().await;
         mock_session(&server).await;

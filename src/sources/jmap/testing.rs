@@ -149,6 +149,16 @@ pub async fn connected_client(server: &MockServer) -> MailClient {
         .expect("client connects")
 }
 
+/// A mock server (serving only the session document) and a client
+/// connected to it, for tests which need a `MailClient` but never talk to
+/// the server afterwards.
+pub async fn test_client() -> (MockServer, MailClient) {
+    let server = MockServer::start().await;
+    mock_session_document(&server, session_json(&server.uri())).await;
+    let client = connected_client(&server).await;
+    (server, client)
+}
+
 pub fn email_json(id: &str, received: &str) -> Value {
     json!({
         "id": id,

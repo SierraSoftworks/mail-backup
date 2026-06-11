@@ -138,7 +138,10 @@ impl Default for StrategyChain {
 
 impl<S: EventStrategy> StrategyChain<S> {
     pub fn new(strategies: Vec<S>) -> Self {
-        let health = strategies.iter().map(|_| StrategyHealth::default()).collect();
+        let health = strategies
+            .iter()
+            .map(|_| StrategyHealth::default())
+            .collect();
         Self {
             strategies,
             health: Mutex::new(health),
@@ -337,4 +340,330 @@ impl<S: EventStrategy> StrategyChain<S> {
 
 fn cancelled(cancel: &AtomicBool) -> bool {
     cancel.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::sources::jmap::testing::test_client;
+
+    /// A scriptable strategy: each subscribe call consumes the next
+    /// outcome, and calls are counted for assertions.
+    struct FakeStrategy {
+        name: &'static str,
+        supported: bool,
+        outcomes: Mutex<VecDeque<Outcome>>,
+        subscribes: AtomicUsize,
+    }
+
+    enum Outcome {
+        /// The subscription attempt fails.
+        Refuse,
+        /// The subscription attempt never resolves.
+        Hang,
+        /// A stream which yields the items, stays open for the duration,
+        /// then ends.
+        Serve(
+            Vec<Result<SourceNotification, human_errors::Error>>,
+            Duration,
+        ),
+    }
+
+    fn fake(name: &'static str, supported: bool, outcomes: Vec<Outcome>) -> FakeStrategy {
+        FakeStrategy {
+            name,
+            supported,
+            outcomes: Mutex::new(outcomes.into()),
+            subscribes: AtomicUsize::new(0),
+        }
+    }
+
+    /// A stream which dies immediately after subscribing.
+    fn quick_death() -> Outcome {
+        Outcome::Serve(Vec::new(), Duration::ZERO)
+    }
+
+    fn ping() -> Outcome {
+        Outcome::Serve(vec![Ok(SourceNotification::Ping)], Duration::ZERO)
+    }
+
+    impl EventStrategy for FakeStrategy {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn supported(&self, _client: &MailClient) -> bool {
+            self.supported
+        }
+
+        async fn subscribe<'a>(
+            &'a self,
+            _client: &'a MailClient,
+        ) -> Result<EventStream<'a>, human_errors::Error> {
+            self.subscribes.fetch_add(1, Ordering::Relaxed);
+            let outcome = self
+                .outcomes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Outcome::Refuse);
+            match outcome {
+                Outcome::Refuse => Err(human_errors::user(
+                    format!("The {} strategy refused to subscribe.", self.name),
+                    &["This is a scripted test failure."],
+                )),
+                Outcome::Hang => {
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                }
+                Outcome::Serve(items, live_for) => Ok(Box::pin(async_stream::stream! {
+                    for item in items {
+                        yield item;
+                    }
+                    tokio::time::sleep(live_for).await;
+                })),
+            }
+        }
+    }
+
+    async fn collect(
+        chain: &StrategyChain<FakeStrategy>,
+        client: &MailClient,
+        cancel: &AtomicBool,
+    ) -> Vec<Result<SourceNotification, human_errors::Error>> {
+        let stream = chain.events(client, cancel);
+        tokio::pin!(stream);
+        let mut items = Vec::new();
+        while let Some(item) = stream.next().await {
+            items.push(item);
+        }
+        items
+    }
+
+    fn subscribes(chain: &StrategyChain<FakeStrategy>, index: usize) -> usize {
+        chain.strategies[index].subscribes.load(Ordering::Relaxed)
+    }
+
+    #[tokio::test]
+    async fn picks_the_first_supported_strategy() {
+        let (_server, client) = test_client().await;
+        let cancel = AtomicBool::new(false);
+        let chain =
+            StrategyChain::new(vec![fake("a", true, vec![ping()]), fake("b", true, vec![])]);
+
+        let items = collect(&chain, &client, &cancel).await;
+
+        assert!(matches!(items[..], [Ok(SourceNotification::Ping)]));
+        assert_eq!(subscribes(&chain, 0), 1);
+        assert_eq!(subscribes(&chain, 1), 0);
+    }
+
+    #[tokio::test]
+    async fn skips_unsupported_strategies() {
+        let (_server, client) = test_client().await;
+        let cancel = AtomicBool::new(false);
+        let chain = StrategyChain::new(vec![
+            fake("a", false, vec![]),
+            fake("b", true, vec![ping()]),
+        ]);
+
+        let items = collect(&chain, &client, &cancel).await;
+
+        assert!(matches!(items[..], [Ok(SourceNotification::Ping)]));
+        assert_eq!(subscribes(&chain, 0), 0);
+        assert_eq!(subscribes(&chain, 1), 1);
+    }
+
+    #[tokio::test]
+    async fn falls_through_when_subscribing_fails() {
+        let (_server, client) = test_client().await;
+        let cancel = AtomicBool::new(false);
+        let chain = StrategyChain::new(vec![
+            fake("a", true, vec![Outcome::Refuse]),
+            fake("b", true, vec![ping()]),
+        ]);
+
+        let items = collect(&chain, &client, &cancel).await;
+
+        assert!(matches!(items[..], [Ok(SourceNotification::Ping)]));
+        assert_eq!(subscribes(&chain, 0), 1);
+        assert_eq!(subscribes(&chain, 1), 1);
+    }
+
+    #[tokio::test]
+    async fn falls_through_when_subscribing_times_out() {
+        let (_server, client) = test_client().await;
+        // Paused only after the real-IO setup so auto-advancing timers
+        // cannot fire the HTTP client's connect timeout mid-handshake.
+        tokio::time::pause();
+        let cancel = AtomicBool::new(false);
+        let chain = StrategyChain::new(vec![
+            fake("a", true, vec![Outcome::Hang]),
+            fake("b", true, vec![ping()]),
+        ]);
+
+        let items = collect(&chain, &client, &cancel).await;
+
+        assert!(matches!(items[..], [Ok(SourceNotification::Ping)]));
+        assert_eq!(subscribes(&chain, 0), 1);
+        assert_eq!(subscribes(&chain, 1), 1);
+    }
+
+    #[tokio::test]
+    async fn yields_an_error_when_nothing_works() {
+        let (_server, client) = test_client().await;
+        let cancel = AtomicBool::new(false);
+        let chain = StrategyChain::new(vec![
+            fake("a", true, vec![Outcome::Refuse]),
+            fake("b", false, vec![]),
+        ]);
+
+        let items = collect(&chain, &client, &cancel).await;
+
+        assert_eq!(items.len(), 1);
+        let error = items[0]
+            .as_ref()
+            .expect_err("the chain must surface an error");
+        assert!(
+            error.to_string().contains("refused to subscribe"),
+            "got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn demotes_a_strategy_after_repeated_quick_failures() {
+        let (_server, client) = test_client().await;
+        let cancel = AtomicBool::new(false);
+        let chain = StrategyChain::new(vec![
+            fake("a", true, vec![quick_death(), quick_death(), quick_death()]),
+            fake("b", true, vec![ping()]),
+        ]);
+
+        for _ in 0..3 {
+            collect(&chain, &client, &cancel).await;
+        }
+        assert_eq!(subscribes(&chain, 1), 0, "a was preferred while healthy");
+
+        // The third quick death demoted "a"; the next run must skip it.
+        let items = collect(&chain, &client, &cancel).await;
+        assert!(matches!(items[..], [Ok(SourceNotification::Ping)]));
+        assert_eq!(subscribes(&chain, 0), 3);
+        assert_eq!(subscribes(&chain, 1), 1);
+    }
+
+    #[tokio::test]
+    async fn a_demoted_strategy_recovers_after_the_cooldown() {
+        let (_server, client) = test_client().await;
+        tokio::time::pause();
+        let cancel = AtomicBool::new(false);
+        let chain = StrategyChain::new(vec![
+            fake(
+                "a",
+                true,
+                vec![quick_death(), quick_death(), quick_death(), ping()],
+            ),
+            fake("b", true, vec![ping(), ping()]),
+        ]);
+
+        for _ in 0..3 {
+            collect(&chain, &client, &cancel).await;
+        }
+        collect(&chain, &client, &cancel).await;
+        assert_eq!(subscribes(&chain, 1), 1, "b takes over during the cooldown");
+
+        tokio::time::advance(COOLDOWN + Duration::from_secs(1)).await;
+
+        let items = collect(&chain, &client, &cancel).await;
+        assert!(matches!(items[..], [Ok(SourceNotification::Ping)]));
+        assert_eq!(subscribes(&chain, 0), 4, "a is preferred again");
+        assert_eq!(subscribes(&chain, 1), 1);
+    }
+
+    #[tokio::test]
+    async fn subscribes_even_when_everything_is_cooling_down() {
+        let (_server, client) = test_client().await;
+        let cancel = AtomicBool::new(false);
+        let chain = StrategyChain::new(vec![fake(
+            "a",
+            true,
+            vec![quick_death(), quick_death(), quick_death(), ping()],
+        )]);
+
+        for _ in 0..3 {
+            collect(&chain, &client, &cancel).await;
+        }
+
+        // "a" is cooling down but it is all we have; the chain must retry it
+        // rather than leave the daemon without notifications.
+        let items = collect(&chain, &client, &cancel).await;
+        assert!(matches!(items[..], [Ok(SourceNotification::Ping)]));
+        assert_eq!(subscribes(&chain, 0), 4);
+    }
+
+    #[tokio::test]
+    async fn healthy_streams_reset_the_failure_streak() {
+        let (_server, client) = test_client().await;
+        tokio::time::pause();
+        let cancel = AtomicBool::new(false);
+        let chain = StrategyChain::new(vec![
+            fake(
+                "a",
+                true,
+                vec![
+                    quick_death(),
+                    quick_death(),
+                    Outcome::Serve(Vec::new(), HEALTHY_STREAM_MIN + Duration::from_secs(1)),
+                    quick_death(),
+                    quick_death(),
+                    ping(),
+                ],
+            ),
+            fake("b", true, vec![ping()]),
+        ]);
+
+        for _ in 0..5 {
+            collect(&chain, &client, &cancel).await;
+        }
+
+        // Without the reset after the long-lived stream, the failure streak
+        // would have hit the demotion threshold and handed over to "b".
+        let items = collect(&chain, &client, &cancel).await;
+        assert!(matches!(items[..], [Ok(SourceNotification::Ping)]));
+        assert_eq!(subscribes(&chain, 0), 6);
+        assert_eq!(subscribes(&chain, 1), 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_is_not_a_strategy_failure() {
+        let (_server, client) = test_client().await;
+        let cancel = AtomicBool::new(false);
+        let chain = StrategyChain::new(vec![fake(
+            "a",
+            true,
+            vec![Outcome::Serve(
+                vec![Ok(SourceNotification::Ping), Ok(SourceNotification::Ping)],
+                Duration::from_secs(60),
+            )],
+        )]);
+
+        let stream = chain.events(&client, &cancel);
+        tokio::pin!(stream);
+        assert!(matches!(
+            stream.next().await,
+            Some(Ok(SourceNotification::Ping))
+        ));
+
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            stream.next().await.is_none(),
+            "cancellation ends the stream"
+        );
+
+        let health = chain.health.lock().unwrap();
+        assert_eq!(health[0].consecutive_failures, 0);
+        assert!(health[0].cooldown_until.is_none());
+    }
 }

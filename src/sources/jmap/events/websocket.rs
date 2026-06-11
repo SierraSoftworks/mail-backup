@@ -54,10 +54,7 @@ impl EventStrategy for WebSocketStrategy {
         client
             .inner()
             .enable_push_ws(
-                Some([
-                    jmap_client::DataType::Email,
-                    jmap_client::DataType::Mailbox,
-                ]),
+                Some([jmap_client::DataType::Email, jmap_client::DataType::Mailbox]),
                 None::<String>,
             )
             .await
@@ -123,5 +120,169 @@ fn collect_changes(push: &PushObject) -> (bool, bool) {
             (acc.0 || email, acc.1 || mailbox)
         }),
         PushObject::CalendarAlert(_) => (false, false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::SinkExt;
+    use tokio_stream::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+    use wiremock::MockServer;
+
+    use crate::sources::jmap::testing::{
+        connected_client, mock_session_document, session_json, session_json_with_websocket,
+    };
+
+    async fn client_with_session(session: serde_json::Value) -> (MockServer, MailClient) {
+        let server = MockServer::start().await;
+        mock_session_document(&server, session).await;
+        let client = connected_client(&server).await;
+        (server, client)
+    }
+
+    #[tokio::test]
+    async fn the_capability_gates_the_strategy() {
+        let server = MockServer::start().await;
+        let (_server, client) = client_with_session(session_json(&server.uri())).await;
+        assert!(
+            !WebSocketStrategy.supported(&client),
+            "no websocket capability means no websocket strategy"
+        );
+
+        let server = MockServer::start().await;
+        let (_server, client) = client_with_session(session_json_with_websocket(
+            &server.uri(),
+            "ws://127.0.0.1:1",
+            false,
+        ))
+        .await;
+        assert!(
+            !WebSocketStrategy.supported(&client),
+            "a websocket endpoint without push support is useless to us"
+        );
+
+        let server = MockServer::start().await;
+        let (_server, client) = client_with_session(session_json_with_websocket(
+            &server.uri(),
+            "ws://127.0.0.1:1",
+            true,
+        ))
+        .await;
+        assert!(WebSocketStrategy.supported(&client));
+    }
+
+    #[tokio::test]
+    async fn delivers_push_notifications_end_to_end() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a local listener binds");
+        let ws_url = format!("ws://{}", listener.local_addr().unwrap());
+
+        // A minimal RFC 8887 server: accept the handshake (capturing the
+        // headers for assertion), read the push-enable frame, deliver one
+        // StateChange, then close.
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("the client connects");
+
+            let mut authorization = None;
+            let mut protocol = None;
+            // The Result type (and its large Err variant) is dictated by
+            // tungstenite's handshake Callback trait.
+            #[allow(clippy::result_large_err)]
+            let callback =
+                |request: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
+                    authorization = request
+                        .headers()
+                        .get("Authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    protocol = request
+                        .headers()
+                        .get("Sec-WebSocket-Protocol")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    response
+                        .headers_mut()
+                        .insert("Sec-WebSocket-Protocol", "jmap".parse().unwrap());
+                    Ok(response)
+                };
+            let mut ws = tokio_tungstenite::accept_hdr_async(stream, callback)
+                .await
+                .expect("the handshake succeeds");
+
+            let push_enable = loop {
+                match ws
+                    .next()
+                    .await
+                    .expect("a frame arrives")
+                    .expect("frame is ok")
+                {
+                    Message::Text(text) => break text.to_string(),
+                    _ => continue,
+                }
+            };
+
+            ws.send(Message::text(
+                r#"{"@type":"StateChange","changed":{"acc-primary":{"Email":"es-2"}}}"#,
+            ))
+            .await
+            .expect("the state change sends");
+            ws.send(Message::Close(None))
+                .await
+                .expect("the close sends");
+
+            (authorization, protocol, push_enable)
+        });
+
+        let server = MockServer::start().await;
+        let (_server, client) =
+            client_with_session(session_json_with_websocket(&server.uri(), &ws_url, true)).await;
+
+        let stream = WebSocketStrategy
+            .subscribe(&client)
+            .await
+            .expect("the subscription succeeds");
+        tokio::pin!(stream);
+
+        let mut notifications = Vec::new();
+        while let Some(item) = stream.next().await {
+            notifications.push(item.expect("the stream stays clean until the server closes"));
+        }
+        assert!(
+            notifications.contains(&SourceNotification::Changed {
+                email: true,
+                mailbox: false
+            }),
+            "got: {notifications:?}"
+        );
+
+        let (authorization, protocol, push_enable) =
+            server_task.await.expect("the server task completes");
+        assert_eq!(authorization.as_deref(), Some("Bearer test-token"));
+        assert_eq!(protocol.as_deref(), Some("jmap"));
+        assert!(
+            push_enable.contains("WebSocketPushEnable"),
+            "got: {push_enable}"
+        );
+        assert!(
+            push_enable.contains("Email") && push_enable.contains("Mailbox"),
+            "got: {push_enable}"
+        );
+    }
+
+    #[test]
+    fn group_pushes_are_flattened() {
+        let push: PushObject = serde_json::from_value(serde_json::json!({
+            "@type": "Group",
+            "entries": [
+                { "@type": "StateChange", "changed": { "acc-primary": { "Mailbox": "ms-1" } } },
+                { "@type": "EmailPush", "accountId": "acc-primary", "email": null },
+            ],
+        }))
+        .expect("a valid push object");
+        assert_eq!(collect_changes(&push), (true, true));
     }
 }
