@@ -71,7 +71,7 @@ mail-backup run --config config.yaml      # daemon with real-time streaming
 ```
 
 Full documentation lives at
-**[sierrasoftworks.github.io/mail-backup](https://sierrasoftworks.github.io/mail-backup)**,
+**[mail-backup.sierrasoftworks.com](https://mail-backup.sierrasoftworks.com)**,
 including the [configuration reference](docs/reference/config.md), the
 [filter language](docs/advanced/filters.md), and the
 [on-disk storage layout](docs/advanced/storage-layout.md).

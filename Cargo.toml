@@ -5,6 +5,7 @@ edition = "2024"
 description = "Backup your JMAP mailboxes to a local git repository with daily snapshots."
 license = "MIT"
 repository = "https://github.com/SierraSoftworks/mail-backup"
+homepage = "https://mail-backup.sierrasoftworks.com"
 
 [dependencies]
 async-stream = "0.3.6"
