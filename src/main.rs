@@ -12,7 +12,6 @@ mod config;
 mod engine;
 mod entities;
 mod errors;
-mod filter;
 pub(crate) mod helpers;
 mod policy;
 mod restore;
@@ -20,7 +19,7 @@ mod sources;
 mod stores;
 mod telemetry;
 
-pub use filter::{Filter, FilterValue, Filterable};
+pub use filt_rs::{Filter, FilterValue, Filterable};
 pub use policy::{BackupPolicy, RestorePolicy, SourceConfig, StoreConfig};
 
 use cli::{Cli, Command};

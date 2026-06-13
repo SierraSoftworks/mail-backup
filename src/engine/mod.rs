@@ -17,6 +17,7 @@ use tracing_batteries::prelude::*;
 
 use crate::BackupPolicy;
 use crate::entities::mail::{MailEvent, MailMessage, MailboxInfo, MessageMeta};
+use crate::errors::HumanizableError;
 use crate::sources::MailSource;
 use crate::stores::{Checkpoint, EventOutcome, MailStore, SnapshotKind};
 
@@ -481,7 +482,10 @@ pub(crate) fn matches_filter<T: MailStore>(
     meta: &MessageMeta,
 ) -> Result<bool, human_errors::Error> {
     let message = MailMessage::new(meta.clone(), store.mailboxes());
-    policy.filter.matches(&message)
+    policy
+        .filter
+        .matches(&message)
+        .map_err(HumanizableError::to_human_error)
 }
 
 /// Sorts planned message updates into adds (unknown to the store and matching

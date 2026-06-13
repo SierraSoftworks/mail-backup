@@ -1036,6 +1036,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "filt-rs"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d62708cb523ef28a2302a8ddff3bd5af0b72f316031c841384a9e621109a86ec"
+dependencies = [
+ "human-errors",
+ "serde",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2774,6 +2784,7 @@ dependencies = [
  "clap",
  "croner",
  "ctrlc",
+ "filt-rs",
  "futures",
  "gix",
  "http 1.4.2",

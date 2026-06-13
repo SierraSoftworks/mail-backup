@@ -140,6 +140,18 @@ impl HumanizableError for jmap_client::Error {
     }
 }
 
+impl HumanizableError for filt_rs::Error {
+    fn to_human_error(self) -> human_errors::Error {
+        human_errors::wrap_user(
+            self,
+            "We could not understand the filter expression.",
+            &[
+                "Check that the filter in your configuration (or the --filter option) is a valid filter expression and try again.",
+            ],
+        )
+    }
+}
+
 impl HumanizableError for reqwest::header::InvalidHeaderValue {
     fn to_human_error(self) -> human_errors::Error {
         human_errors::wrap_system(
