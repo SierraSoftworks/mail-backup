@@ -48,3 +48,40 @@ fn borrow_value<'a>(value: &'a FilterValue<'static>) -> FilterValue<'a> {
         FilterValue::Tuple(items) => FilterValue::Tuple(items.iter().map(borrow_value).collect()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_borrows_each_value_kind() {
+        let mut meta = Metadata::default();
+        meta.insert("flag", true);
+        meta.insert("count", 3u32);
+        meta.insert("name", "Alice".to_string());
+        meta.insert("nothing", FilterValue::Null);
+        meta.insert(
+            "tags",
+            vec![FilterValue::from("red".to_string()), FilterValue::from(7u8)],
+        );
+
+        assert_eq!(meta.get("flag"), FilterValue::Bool(true));
+        assert_eq!(meta.get("count"), FilterValue::Number(3.0));
+        assert_eq!(meta.get("name"), FilterValue::from("Alice"));
+        assert_eq!(meta.get("nothing"), FilterValue::Null);
+        assert_eq!(
+            meta.get("tags"),
+            FilterValue::Tuple(vec![FilterValue::from("red"), FilterValue::from(7u8)])
+        );
+    }
+
+    #[test]
+    fn get_is_case_insensitive_and_misses_are_null() {
+        let mut meta = Metadata::default();
+        meta.insert("Subject", "Quarterly invoice".to_string());
+
+        assert_eq!(meta.get("subject"), FilterValue::from("Quarterly invoice"));
+        assert_eq!(meta.get("SUBJECT"), FilterValue::from("Quarterly invoice"));
+        assert_eq!(meta.get("missing"), FilterValue::Null);
+    }
+}

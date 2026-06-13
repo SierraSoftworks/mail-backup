@@ -209,3 +209,23 @@ impl std::fmt::Display for ResponseError {
 }
 
 impl std::error::Error for ResponseError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filter_parse_error_is_humanized_as_user_error() {
+        // An unterminated string literal is a lexer error, giving us a
+        // `filt_rs::Error` to humanize.
+        let err = crate::Filter::new("subject == \"unterminated")
+            .expect_err("an unterminated string should fail to parse");
+
+        let humanized = err.to_human_error();
+        let rendered = format!("{}", human_errors::pretty(&humanized));
+        assert!(
+            rendered.contains("filter expression"),
+            "unexpected rendering: {rendered}"
+        );
+    }
+}
