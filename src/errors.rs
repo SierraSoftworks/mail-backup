@@ -140,6 +140,18 @@ impl HumanizableError for jmap_client::Error {
     }
 }
 
+impl HumanizableError for filt_rs::Error {
+    fn to_human_error(self) -> human_errors::Error {
+        human_errors::wrap_user(
+            self,
+            "We could not understand the filter expression.",
+            &[
+                "Check that the filter in your configuration (or the --filter option) is a valid filter expression and try again.",
+            ],
+        )
+    }
+}
+
 impl HumanizableError for reqwest::header::InvalidHeaderValue {
     fn to_human_error(self) -> human_errors::Error {
         human_errors::wrap_system(
@@ -197,3 +209,23 @@ impl std::fmt::Display for ResponseError {
 }
 
 impl std::error::Error for ResponseError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filter_parse_error_is_humanized_as_user_error() {
+        // An unterminated string literal is a lexer error, giving us a
+        // `filt_rs::Error` to humanize.
+        let err = crate::Filter::new("subject == \"unterminated")
+            .expect_err("an unterminated string should fail to parse");
+
+        let humanized = err.to_human_error();
+        let rendered = format!("{}", human_errors::pretty(&humanized));
+        assert!(
+            rendered.contains("filter expression"),
+            "unexpected rendering: {rendered}"
+        );
+    }
+}

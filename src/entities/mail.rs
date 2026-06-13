@@ -158,9 +158,9 @@ impl MailMessage {
 
 impl MessageMeta {
     fn inject_metadata_with(&self, metadata: &mut Metadata, mailboxes: &MailboxIndex) {
-        metadata.insert("message.id", self.id.as_str());
-        metadata.insert("message.thread", self.thread_id.as_str());
-        metadata.insert("message.blob", self.blob_id.as_str());
+        metadata.insert("message.id", self.id.clone());
+        metadata.insert("message.thread", self.thread_id.clone());
+        metadata.insert("message.blob", self.blob_id.clone());
 
         let mut paths: Vec<String> = self
             .mailbox_ids
@@ -180,10 +180,10 @@ impl MessageMeta {
             paths.into_iter().map(FilterValue::from).collect::<Vec<_>>(),
         );
 
-        let keywords: Vec<FilterValue> = self
+        let keywords: Vec<FilterValue<'static>> = self
             .keywords
             .iter()
-            .map(|k| FilterValue::from(k.as_str()))
+            .map(|k| FilterValue::from(k.clone()))
             .collect();
         metadata.insert("message.keyword", keywords.clone());
         metadata.insert("message.keywords", keywords);
@@ -200,20 +200,20 @@ impl MessageMeta {
         metadata.insert("message.size", self.size as u32);
 
         if let Some(subject) = &self.subject {
-            metadata.insert("message.subject", subject.as_str());
+            metadata.insert("message.subject", subject.clone());
         }
         metadata.insert(
             "message.from",
             self.from
                 .iter()
-                .map(|f| FilterValue::from(f.as_str()))
+                .map(|f| FilterValue::from(f.clone()))
                 .collect::<Vec<_>>(),
         );
     }
 }
 
 impl Filterable for MailMessage {
-    fn get(&self, key: &str) -> FilterValue {
+    fn get(&self, key: &str) -> FilterValue<'_> {
         self.metadata.get(key)
     }
 }

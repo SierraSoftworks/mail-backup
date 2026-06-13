@@ -12,6 +12,7 @@ use std::sync::atomic::AtomicBool;
 use tracing_batteries::prelude::*;
 
 use crate::entities::mail::{MailMessage, MailboxInfo, MessageMeta};
+use crate::errors::HumanizableError;
 use crate::policy::{DedupeMode, RestorePolicy};
 use reader::Archive;
 
@@ -114,7 +115,9 @@ pub async fn run_restore<T: RestoreTarget>(
     };
 
     let filter = match &options.filter {
-        Some(expression) => &crate::Filter::new(expression.as_str())?,
+        Some(expression) => {
+            &crate::Filter::new(expression.as_str()).map_err(HumanizableError::to_human_error)?
+        }
         None => &policy.filter,
     };
 
@@ -129,7 +132,10 @@ pub async fn run_restore<T: RestoreTarget>(
     let mut selected = Vec::new();
     for message in &archive.messages {
         let view = MailMessage::new(message.meta.clone(), &mailbox_index);
-        if filter.matches(&view)? {
+        if filter
+            .matches(&view)
+            .map_err(HumanizableError::to_human_error)?
+        {
             selected.push(message);
         } else {
             summary.skipped_filter += 1;
