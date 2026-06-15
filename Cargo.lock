@@ -1037,9 +1037,9 @@ dependencies = [
 
 [[package]]
 name = "filt-rs"
-version = "1.0.0"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d62708cb523ef28a2302a8ddff3bd5af0b72f316031c841384a9e621109a86ec"
+checksum = "b6b2137f98f1cdb6e92f000d78ff8a094f12d66d0acda26c239d59a2c9675155"
 dependencies = [
  "human-errors",
  "serde",
