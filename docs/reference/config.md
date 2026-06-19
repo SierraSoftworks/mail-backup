@@ -31,9 +31,23 @@ restores:
 ```
 
 ## `schedule`
-A cron expression controlling how often a periodic reconciliation runs. For the daemon
-(`run`) this is a safety net alongside the real-time stream; when omitted, a 6-hour
-default applies.
+A cron expression controlling how often the daemon (`run`) performs a full snapshot
+refresh: a complete re-enumeration of the server, reconciled against the archive, on top
+of the real-time stream and a 6-hour changes-based catch-up. Because the stream and the
+catch-up both read from the same server-state cursor, the refresh is what recovers
+anything the server failed to record there. Each scheduled refresh is reported to the
+policy's [`ping`](#cron-monitoring-ping) endpoints. With no schedule configured the 6-hour
+catch-up still runs, but no full refresh does.
+
+A **daily or weekly** cadence (e.g. `0 6 * * *` for 6 a.m. daily, or `0 6 * * 0` for
+weekly on Sunday) is recommended. The refresh is a metadata-only enumeration — it lists
+every message and compares it against the archive, but never re-downloads message bodies
+it already holds — so its cost scales with the size of the mailbox, not the schedule. It
+is a safety net, not the primary sync: the real-time stream and the 6-hour catch-up keep
+the archive current between refreshes on a far more frequent cadence, so the schedule only
+needs to be frequent enough to catch the rare change the server's change feed missed.
+Avoid sub-hourly schedules on large mailboxes, where a full enumeration every few minutes
+adds needless load for little benefit.
 
 ## Sources (`from:` in backups, `to:` in restores)
 Sources describe a mail account, written as YAML tagged values. Credentials are part of
@@ -88,8 +102,9 @@ Reports the lifecycle of each scheduled backup run to an external HTTP cron moni
 for example [Sentry Crons](https://docs.sentry.io/product/crons/) or
 [Healthchecks.io](https://healthchecks.io/). Each state has its own URL, fetched with a
 plain HTTP `GET` as the run reaches it; any state you omit is simply not reported. Only
-full backup runs are reported — the daemon's live streaming syncs are not, and a run cut
-short by shutdown reports neither success nor failure.
+full backup runs are reported — a one-shot `backup`, and in the daemon the initial pass
+and each scheduled [snapshot refresh](#schedule). The daemon's incremental live syncs are
+not reported, and a run cut short by shutdown reports neither success nor failure.
 
 Pings are best-effort: a ping that fails or times out is logged and otherwise ignored, so
 an unreachable monitor can never take a backup down.

@@ -11,7 +11,9 @@
 //! backup run it reports, so a monitor that understands trace context can join
 //! the ping to the same distributed trace.
 //!
-//! Only full backup *runs* are reported; the daemon's live streaming syncs are
+//! Only full backup *runs* — one-shot backups, and in the daemon the initial
+//! pass and each scheduled snapshot refresh — are reported. The daemon's
+//! incremental live syncs (notification- and safety-poll-driven) are
 //! deliberately ignored, since a cron monitor tracks scheduled runs rather than
 //! every incremental change.
 //!

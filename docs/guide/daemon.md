@@ -31,9 +31,23 @@ never lose data. In addition:
 
 - If the event stream drops, the daemon reconnects with exponential backoff and always
   runs a catch-up synchronization on reconnection.
-- The cron expression in `schedule` acts as a safety net, running a full synchronization
-  on that cadence even while the stream is healthy (a 6-hour fallback applies when no
-  schedule is configured).
+- A changes-based catch-up also runs every 6 hours regardless of notifications, as a
+  belt-and-braces against any missed events.
+- On the cadence set by the cron expression in `schedule`, the daemon runs a full
+  *snapshot refresh* — a complete re-enumeration of the server reconciled against the
+  archive — even while the stream is healthy. Because the event stream and the
+  changes-based syncs both read from the same server-state cursor, neither can recover a
+  change the server failed to record there; the snapshot refresh does not depend on the
+  cursor, so it catches anything they missed. It never re-downloads messages it already
+  holds, and (like the initial pass) it is reported to the policy's [`ping`](../reference/config.md#cron-monitoring-ping)
+  endpoints. With no schedule configured, only the 6-hour catch-up applies.
+
+  A **daily or weekly** schedule is the sweet spot. The refresh is a metadata-only
+  enumeration whose cost scales with the size of the mailbox, and it is only a safety net —
+  the real-time stream and the 6-hour catch-up already keep the archive current on a much
+  more frequent cadence, so the refresh just needs to run often enough to catch the rare
+  change the server's change feed dropped. There is little to gain from running it more
+  than a few times a day, and a sub-hourly schedule on a large mailbox is mostly wasted work.
 - If the server can no longer compute changes from our saved state (for example after a
   very long offline period), the daemon automatically falls back to a full reconciliation,
   which never re-downloads messages it already holds.

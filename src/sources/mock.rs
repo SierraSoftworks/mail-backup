@@ -28,6 +28,10 @@ pub struct MockMailSource {
     pub account_id: String,
     inner: Mutex<MockState>,
     notifications: Mutex<Vec<SourceNotification>>,
+    /// When set, the event stream stays open after draining its queued
+    /// notifications (rather than ending), modelling a healthy long-lived
+    /// subscription so timer-driven behaviour like the schedule can be tested.
+    hold_events: bool,
 }
 
 #[derive(Default)]
@@ -47,7 +51,14 @@ impl MockMailSource {
             account_id: account_id.to_string(),
             inner: Mutex::new(MockState::default()),
             notifications: Mutex::new(Vec::new()),
+            hold_events: false,
         }
+    }
+
+    /// Keeps the event stream open after its queued notifications drain,
+    /// instead of ending it, so the streaming loop keeps running on its timers.
+    pub fn hold_events_open(&mut self) {
+        self.hold_events = true;
     }
 
     pub fn upsert_mailbox(&self, info: MailboxInfo) {
@@ -85,6 +96,20 @@ impl MockMailSource {
         state
             .journal
             .push((seq, ChangeEntry::MessageUpdated(meta.id.clone())));
+        let raw = state
+            .messages
+            .get(&meta.id)
+            .map(|(_, raw)| raw.clone())
+            .unwrap_or_default();
+        state.messages.insert(meta.id.clone(), (meta, raw));
+    }
+
+    /// Mutates a message's metadata without journaling the change or advancing
+    /// the server state, modelling an update the change feed (and the event
+    /// stream that piggybacks on it) failed to report. A changes-based sync
+    /// cannot observe it; only a full re-enumeration (reconcile) will.
+    pub fn update_message_silently(&self, meta: MessageMeta) {
+        let mut state = self.inner.lock().unwrap();
         let raw = state
             .messages
             .get(&meta.id)
@@ -237,6 +262,9 @@ impl MailSource for MockMailSource {
                 let next = self.notifications.lock().unwrap().pop();
                 match next {
                     Some(notification) => yield Ok(notification),
+                    // A held-open stream stays subscribed (like a healthy SSE
+                    // connection) rather than ending when the queue empties.
+                    None if self.hold_events => std::future::pending().await,
                     None => break,
                 }
             }

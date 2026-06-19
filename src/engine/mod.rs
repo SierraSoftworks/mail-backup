@@ -129,21 +129,14 @@ impl Display for BackupSummary {
     }
 }
 
-/// Runs a complete backup pass for one policy: backfill if the store has
-/// never finished one, then a changes-based catch-up (falling back to a full
-/// reconciliation when the server can no longer compute changes).
-pub async fn run_backup<S: MailSource, T: MailStore>(
+/// Opens the store, connects the source, and verifies the store belongs to the
+/// connected account, returning the freshly connected source state (the anchor
+/// for a backfill or reconciliation).
+async fn open_and_connect<S: MailSource, T: MailStore>(
     source: &mut S,
     store: &mut T,
-    policy: &BackupPolicy,
     options: &EngineOptions,
-    cancel: &AtomicBool,
-) -> Result<BackupSummary, human_errors::Error> {
-    debug!(
-        "Backing up from a {} source into a {} store",
-        source.kind(),
-        store.kind()
-    );
+) -> Result<crate::entities::mail::SourceState, human_errors::Error> {
     store.open().await?;
     let connected = source.connect().await?;
 
@@ -162,6 +155,26 @@ pub async fn run_backup<S: MailSource, T: MailStore>(
     if !options.dry_run {
         store.state_mut().source.account_id = connected.account_id.clone();
     }
+
+    Ok(connected)
+}
+
+/// Runs a complete backup pass for one policy: backfill if the store has
+/// never finished one, then a changes-based catch-up (falling back to a full
+/// reconciliation when the server can no longer compute changes).
+pub async fn run_backup<S: MailSource, T: MailStore>(
+    source: &mut S,
+    store: &mut T,
+    policy: &BackupPolicy,
+    options: &EngineOptions,
+    cancel: &AtomicBool,
+) -> Result<BackupSummary, human_errors::Error> {
+    debug!(
+        "Backing up from a {} source into a {} store",
+        source.kind(),
+        store.kind()
+    );
+    let connected = open_and_connect(source, store, options).await?;
 
     let mut summary = BackupSummary::default();
 
@@ -191,6 +204,38 @@ pub async fn run_backup<S: MailSource, T: MailStore>(
     }
 
     Ok(summary)
+}
+
+/// Runs a full snapshot refresh for one policy: a complete re-enumeration of
+/// the server, reconciled against the store. Unlike a changes-based catch-up,
+/// this does not ask the server to compute changes from our saved cursor — so
+/// it recovers anything the real-time event stream (and the incremental syncs
+/// that cursor drives) failed to observe, which is why the daemon runs it on
+/// the configured schedule. Content already held is never re-downloaded; only
+/// new messages and changed metadata are fetched.
+///
+/// If the store has never completed a backfill, that runs instead — there is
+/// nothing yet to reconcile against.
+pub async fn run_refresh<S: MailSource, T: MailStore>(
+    source: &mut S,
+    store: &mut T,
+    policy: &BackupPolicy,
+    options: &EngineOptions,
+    cancel: &AtomicBool,
+) -> Result<BackupSummary, human_errors::Error> {
+    debug!(
+        "Refreshing the {} store from a {} source",
+        store.kind(),
+        source.kind()
+    );
+    let connected = open_and_connect(source, store, options).await?;
+
+    if store.state().needs_backfill() {
+        info!("Starting backfill for {}", policy);
+        return backfill::run(source, store, policy, options, cancel, &connected).await;
+    }
+
+    sync::reconcile(source, store, policy, options, cancel, &connected).await
 }
 
 pub(crate) fn cancelled(cancel: &AtomicBool) -> bool {

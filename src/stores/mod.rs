@@ -210,6 +210,13 @@ impl MailStore for AnyStore {
             AnyStore::Dir(store) => store.checkpoint(checkpoint).await,
         }
     }
+
+    async fn save_state(&mut self) -> Result<(), human_errors::Error> {
+        match self {
+            AnyStore::Git(store) => store.save_state().await,
+            AnyStore::Dir(store) => store.save_state().await,
+        }
+    }
 }
 
 /// A destination which mail is backed up into.
@@ -244,4 +251,9 @@ pub trait MailStore: Send {
     /// Persists state at a snapshot boundary. Git stores commit (or amend)
     /// here; all stores save their state and index.
     async fn checkpoint(&mut self, checkpoint: &Checkpoint) -> Result<(), human_errors::Error>;
+
+    /// Durably persists the current state and index without creating a
+    /// snapshot commit. Used to record progress (such as backfill completion)
+    /// that must survive a reopen even when no snapshot boundary follows it.
+    async fn save_state(&mut self) -> Result<(), human_errors::Error>;
 }

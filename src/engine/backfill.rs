@@ -162,10 +162,15 @@ pub async fn run<S: MailSource, T: MailStore>(
     // Enumeration is complete: switch the synchronization cursor to the state
     // captured when the backfill began. The regular catch-up which follows
     // every backup pass replays anything that changed while we were
-    // backfilling. Persisted by that catch-up's concluding checkpoint.
+    // backfilling.
     store.state_mut().source.email_state = cursor.start_email_state.clone();
     store.state_mut().source.mailbox_state = cursor.start_mailbox_state.clone();
     store.state_mut().backfill = None;
+
+    // Persist completion now so it survives a reopen even if the catch-up that
+    // follows finds nothing to checkpoint — otherwise a quiet mailbox would
+    // re-run the backfill (and never reach reconciliation) on every restart.
+    store.save_state().await?;
 
     info!("Backfill complete: {}", summary);
     Ok(summary)
