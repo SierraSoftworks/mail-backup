@@ -110,12 +110,15 @@ pub async fn run<S: MailSource, T: MailStore>(
         );
         // The backup pass is wrapped in a `start`/`success`/`failure` ping; an
         // interrupted pass (clean shutdown) is reported as neither, since it
-        // resumes on the next run.
+        // resumes on the next run. Instrumenting the whole `observe` (rather
+        // than just the backup) means the pings run inside the `daemon.backup`
+        // span and carry its trace context to the monitor.
         let outcome = pinger
             .observe(
-                super::run_backup(source, store, policy, options, cancel).instrument(span.clone()),
+                super::run_backup(source, store, policy, options, cancel),
                 BackupSummary::completed,
             )
+            .instrument(span.clone())
             .await;
         match outcome {
             Ok(summary) => {

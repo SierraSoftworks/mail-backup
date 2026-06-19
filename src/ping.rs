@@ -7,6 +7,10 @@
 //! ping that fails or times out is logged but never affects the backup itself
 //! (monitoring must never be able to take a backup down).
 //!
+//! Each ping carries the W3C trace context (`traceparent`/`tracestate`) of the
+//! backup run it reports, so a monitor that understands trace context can join
+//! the ping to the same distributed trace.
+//!
 //! Only full backup *runs* are reported; the daemon's live streaming syncs are
 //! deliberately ignored, since a cron monitor tracks scheduled runs rather than
 //! every incremental change.
@@ -18,6 +22,10 @@ use std::future::Future;
 use std::time::Duration;
 
 use serde::Deserialize;
+// The tracing-batteries prelude re-exports the OpenTelemetry pieces we need —
+// `OpenTelemetrySpanExt` (for the current span's context), the global
+// `get_text_map_propagator`, the `TextMapPropagator`/`Injector` traits — which
+// keeps us pinned to the exact same `opentelemetry` version it uses.
 use tracing_batteries::prelude::*;
 use url::Url;
 
@@ -69,6 +77,43 @@ impl PingState {
             PingState::Failure => "failure",
         }
     }
+}
+
+/// A carrier that lets the OpenTelemetry propagator write the outgoing trace
+/// context into a [`reqwest`] header map.
+struct HeaderInjector<'a>(&'a mut reqwest::header::HeaderMap);
+
+impl OpenTelemetryPropagationInjector for HeaderInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        if let (Ok(name), Ok(value)) = (
+            reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+            reqwest::header::HeaderValue::from_str(&value),
+        ) {
+            self.0.insert(name, value);
+        }
+    }
+}
+
+/// Injects `context`'s W3C trace context (`traceparent`/`tracestate`) into
+/// `headers` using the globally configured propagator. A no-op when the context
+/// has no valid active span, so nothing is sent when there is no trace to join.
+fn inject_trace_context(
+    context: &opentelemetry::Context,
+    headers: &mut reqwest::header::HeaderMap,
+) {
+    get_text_map_propagator(|propagator| {
+        propagator.inject_context(context, &mut HeaderInjector(headers));
+    });
+}
+
+/// Builds the request headers for a ping, carrying the current span's trace
+/// context so the monitoring service can join the ping to the backup run's
+/// distributed trace. Empty when no trace is active (e.g. when OpenTelemetry
+/// export is not configured).
+fn trace_context_headers() -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    inject_trace_context(&Span::current().context(), &mut headers);
+    headers
 }
 
 /// Pings the HTTP cron monitor configured for a backup policy as its runs start
@@ -131,7 +176,11 @@ impl Pinger {
         };
 
         debug!("Pinging the {} cron monitor at {}", state.label(), url);
-        match self.client.get(url.clone()).send().await {
+        let request = self
+            .client
+            .get(url.clone())
+            .headers(trace_context_headers());
+        match request.send().await {
             Ok(response) if response.status().is_success() => {}
             Ok(response) => warn!(
                 "The {} cron monitor at {} responded with HTTP {}",
@@ -153,8 +202,30 @@ impl Pinger {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use tracing_batteries::prelude::opentelemetry::Context;
+    use tracing_batteries::prelude::opentelemetry::trace::{
+        SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
+    };
+    use tracing_batteries::prelude::{TraceContextPropagator, set_text_map_propagator};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// An OpenTelemetry context carrying a known, valid remote span context, so
+    /// the propagator has a trace to inject. Returns it with the `traceparent`
+    /// value it should produce.
+    fn test_trace_context() -> (Context, String) {
+        let trace_id = "0af7651916cd43dd8448eb211c80319c";
+        let span_id = "b7ad6b7169203331";
+        let span_context = SpanContext::new(
+            TraceId::from_hex(trace_id).unwrap(),
+            SpanId::from_hex(span_id).unwrap(),
+            TraceFlags::SAMPLED,
+            true,
+            TraceState::default(),
+        );
+        let context = Context::new().with_remote_span_context(span_context);
+        (context, format!("00-{trace_id}-{span_id}-01"))
+    }
 
     fn url(base: &str, suffix: &str) -> Url {
         format!("{base}{suffix}").parse().unwrap()
@@ -309,5 +380,55 @@ mod tests {
             .observe(async { Err("boom") }, |_| panic!("not called on error"))
             .await;
         assert_eq!(result, Err("boom"));
+    }
+
+    #[test]
+    fn injects_the_active_traceparent() {
+        set_text_map_propagator(TraceContextPropagator::new());
+        let (context, expected) = test_trace_context();
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        inject_trace_context(&context, &mut headers);
+
+        let traceparent = headers
+            .get("traceparent")
+            .expect("a traceparent header is injected for the active trace")
+            .to_str()
+            .unwrap();
+        assert_eq!(traceparent, expected);
+    }
+
+    #[test]
+    fn injects_nothing_without_an_active_trace() {
+        set_text_map_propagator(TraceContextPropagator::new());
+        // An empty context has no valid span, so nothing is propagated.
+        let mut headers = reqwest::header::HeaderMap::new();
+        inject_trace_context(&Context::new(), &mut headers);
+        assert!(headers.get("traceparent").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_ping_without_an_active_trace_sends_no_trace_headers() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let pinger = Pinger::new(PingConfig {
+            start: Some(server.uri().parse().unwrap()),
+            ..Default::default()
+        });
+        pinger.ping(PingState::Start).await;
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("the server records requests");
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].headers.get("traceparent").is_none(),
+            "no traceparent should be sent when no trace is active"
+        );
     }
 }
