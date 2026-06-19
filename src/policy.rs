@@ -1,9 +1,9 @@
 use serde::Deserialize;
 use std::fmt::{Debug, Display, Formatter};
 use std::path::PathBuf;
-use url::Url;
 
 use crate::Filter;
+use crate::ping::PingConfig;
 
 /// A mail service which messages can be backed up from, and restored to.
 ///
@@ -122,39 +122,6 @@ impl Display for StoreConfig {
 impl Debug for StoreConfig {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         Display::fmt(self, f)
-    }
-}
-
-/// HTTP cron-monitoring endpoints, pinged as a scheduled backup run reaches
-/// each lifecycle state. Designed for services such as [Sentry Crons] or
-/// [Healthchecks.io].
-///
-/// Each state has its own URL, so the same shape works both for services that
-/// distinguish states with a query string (Sentry uses `?status=in_progress`,
-/// `?status=ok` and `?status=error`) and for those that use a path suffix
-/// (Healthchecks uses `/start` and `/fail`). Any state left unset is simply not
-/// reported. Pings are best-effort: a failed or slow ping is logged but never
-/// affects the backup itself.
-///
-/// [Sentry Crons]: https://docs.sentry.io/product/crons/
-/// [Healthchecks.io]: https://healthchecks.io/
-#[derive(Deserialize, Clone, Debug, Default, PartialEq, Eq)]
-pub struct PingConfig {
-    /// Pinged when a backup run begins.
-    #[serde(default)]
-    pub start: Option<Url>,
-    /// Pinged when a backup run completes successfully.
-    #[serde(default)]
-    pub success: Option<Url>,
-    /// Pinged when a backup run fails.
-    #[serde(default)]
-    pub fail: Option<Url>,
-}
-
-impl PingConfig {
-    /// Whether at least one state has a URL configured.
-    pub fn is_enabled(&self) -> bool {
-        self.start.is_some() || self.success.is_some() || self.fail.is_some()
     }
 }
 
@@ -278,10 +245,9 @@ mod tests {
           ping:
             start: https://sentry.io/api/0/cron/personal/key/?status=in_progress
             success: https://sentry.io/api/0/cron/personal/key/?status=ok
-            fail: https://sentry.io/api/0/cron/personal/key/?status=error
+            failure: https://sentry.io/api/0/cron/personal/key/?status=error
         "#;
         let policy: BackupPolicy = serde_yaml::from_str(policy).unwrap();
-        assert!(policy.ping.is_enabled());
         assert_eq!(
             policy.ping.start.as_ref().unwrap().as_str(),
             "https://sentry.io/api/0/cron/personal/key/?status=in_progress"
@@ -291,7 +257,7 @@ mod tests {
             "https://sentry.io/api/0/cron/personal/key/?status=ok"
         );
         assert_eq!(
-            policy.ping.fail.as_ref().unwrap().as_str(),
+            policy.ping.failure.as_ref().unwrap().as_str(),
             "https://sentry.io/api/0/cron/personal/key/?status=error"
         );
     }
@@ -302,21 +268,19 @@ mod tests {
             "from: !Fastmail { token: x }\nto: !LocalDir { path: /backup/mail }",
         )
         .unwrap();
-        assert!(!policy.ping.is_enabled());
         assert_eq!(policy.ping, PingConfig::default());
     }
 
     #[test]
     fn deserialize_partial_ping() {
         let policy: BackupPolicy = serde_yaml::from_str(
-            "from: !Fastmail { token: x }\nto: !LocalDir { path: /x }\nping:\n  fail: https://example.com/fail",
+            "from: !Fastmail { token: x }\nto: !LocalDir { path: /x }\nping:\n  failure: https://example.com/fail",
         )
         .unwrap();
-        assert!(policy.ping.is_enabled());
         assert!(policy.ping.start.is_none());
         assert!(policy.ping.success.is_none());
         assert_eq!(
-            policy.ping.fail.as_ref().unwrap().as_str(),
+            policy.ping.failure.as_ref().unwrap().as_str(),
             "https://example.com/fail"
         );
     }

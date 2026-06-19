@@ -98,7 +98,7 @@ an unreachable monitor can never take a backup down.
 |---|---|---|
 | `start` | no | Pinged when a run begins. |
 | `success` | no | Pinged when a run completes successfully. |
-| `fail` | no | Pinged when a run fails. |
+| `failure` | no | Pinged when a run fails. |
 
 ```yaml
 backups:
@@ -109,11 +109,11 @@ backups:
       # Sentry distinguishes states with a query string …
       start: https://sentry.io/api/0/monitors/personal/<key>/?status=in_progress
       success: https://sentry.io/api/0/monitors/personal/<key>/?status=ok
-      fail: https://sentry.io/api/0/monitors/personal/<key>/?status=error
+      failure: https://sentry.io/api/0/monitors/personal/<key>/?status=error
       # … while Healthchecks.io uses a path suffix:
       # start: https://hc-ping.com/<uuid>/start
       # success: https://hc-ping.com/<uuid>
-      # fail: https://hc-ping.com/<uuid>/fail
+      # failure: https://hc-ping.com/<uuid>/fail
 ```
 
 ## Restore policy fields

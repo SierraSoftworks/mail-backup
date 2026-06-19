@@ -23,7 +23,7 @@ use tracing_batteries::prelude::*;
 use super::{BackupSummary, EngineOptions, cancelled, sync};
 use crate::BackupPolicy;
 use crate::entities::mail::SourceNotification;
-use crate::monitor::Monitor;
+use crate::ping::Pinger;
 use crate::sources::MailSource;
 use crate::stores::MailStore;
 
@@ -70,9 +70,9 @@ pub enum StreamEnd {
 /// Runs the daemon for a single policy: an initial backup pass (backfill
 /// and/or catch-up), then the streaming loop with reconnection.
 ///
-/// Each full backup pass is reported to the policy's cron `monitor`; the live
-/// streaming syncs in between are intentionally not, as a cron monitor tracks
-/// scheduled runs rather than every incremental change.
+/// Each full backup pass is reported to the policy's cron `ping` endpoints; the
+/// live streaming syncs in between are intentionally not, as a cron monitor
+/// tracks scheduled runs rather than every incremental change.
 #[allow(clippy::too_many_arguments)]
 pub async fn run<S: MailSource, T: MailStore>(
     name: &str,
@@ -81,10 +81,10 @@ pub async fn run<S: MailSource, T: MailStore>(
     policy: &BackupPolicy,
     options: &EngineOptions,
     stream_options: &StreamOptions,
-    monitor: &Monitor,
     schedule: Option<&croner::Cron>,
     cancel: &AtomicBool,
 ) -> Result<(), human_errors::Error> {
+    let pinger = Pinger::new(policy.ping.clone());
     let mut backoff = stream_options.reconnect_min;
 
     while !cancelled(cancel) {
@@ -108,27 +108,28 @@ pub async fn run<S: MailSource, T: MailStore>(
             interrupted = EmptyField,
             error = EmptyField,
         );
-        monitor.started().await;
-        match super::run_backup(source, store, policy, options, cancel)
-            .instrument(span.clone())
-            .await
-        {
+        // The backup pass is wrapped in a `start`/`success`/`failure` ping; an
+        // interrupted pass (clean shutdown) is reported as neither, since it
+        // resumes on the next run.
+        let outcome = pinger
+            .observe(
+                super::run_backup(source, store, policy, options, cancel).instrument(span.clone()),
+                BackupSummary::completed,
+            )
+            .await;
+        match outcome {
             Ok(summary) => {
                 summary.record_span(&span);
                 if summary.changes() > 0 {
                     info!("Synchronized {}: {}", policy, summary);
                 }
                 if summary.interrupted {
-                    // Shutdown mid-pass: report neither success nor failure, as
-                    // the pass will resume on the next run.
                     break;
                 }
-                monitor.succeeded().await;
                 backoff = stream_options.reconnect_min;
             }
             Err(e) => {
                 span.record("error", display(&e));
-                monitor.failed().await;
                 warn!(
                     "Synchronization of {} failed: {}; retrying in {:?}",
                     policy, e, backoff
@@ -512,7 +513,6 @@ mod tests {
         let policy = policy();
         let options = EngineOptions::default();
         let stream_options = fast_stream_options();
-        let monitor = Monitor::new(Default::default());
         let daemon = run(
             "test",
             &mut source,
@@ -520,7 +520,6 @@ mod tests {
             &policy,
             &options,
             &stream_options,
-            &monitor,
             None,
             &cancel,
         );
