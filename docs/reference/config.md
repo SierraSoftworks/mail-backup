@@ -94,6 +94,11 @@ short by shutdown reports neither success nor failure.
 Pings are best-effort: a ping that fails or times out is logged and otherwise ignored, so
 an unreachable monitor can never take a backup down.
 
+Each ping carries the W3C trace context (a `traceparent` header) of the backup run it
+reports, so a monitor that understands trace context can correlate it with the same
+OpenTelemetry trace as the run. Nothing is added when OpenTelemetry tracing is not
+configured.
+
 | Field | Required | Description |
 |---|---|---|
 | `start` | no | Pinged when a run begins. |
