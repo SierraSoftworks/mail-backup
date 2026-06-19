@@ -81,6 +81,40 @@ A plain directory tree with the same layout, but no version history.
 | `to` | yes | The store to back it up into. Each store holds exactly one account. |
 | `filter` | no | Which messages to archive (default: everything). See [Filters](../advanced/filters.md). |
 | `backfill_start` | no | The earliest day of mail (by received date) the initial backfill reaches back to. |
+| `ping` | no | HTTP cron-monitoring endpoints for this policy's scheduled runs. See [Cron monitoring](#cron-monitoring-ping). |
+
+### Cron monitoring (`ping`)
+Reports the lifecycle of each scheduled backup run to an external HTTP cron monitor —
+for example [Sentry Crons](https://docs.sentry.io/product/crons/) or
+[Healthchecks.io](https://healthchecks.io/). Each state has its own URL, fetched with a
+plain HTTP `GET` as the run reaches it; any state you omit is simply not reported. Only
+full backup runs are reported — the daemon's live streaming syncs are not, and a run cut
+short by shutdown reports neither success nor failure.
+
+Pings are best-effort: a ping that fails or times out is logged and otherwise ignored, so
+an unreachable monitor can never take a backup down.
+
+| Field | Required | Description |
+|---|---|---|
+| `start` | no | Pinged when a run begins. |
+| `success` | no | Pinged when a run completes successfully. |
+| `fail` | no | Pinged when a run fails. |
+
+```yaml
+backups:
+  personal:
+    from: !Fastmail { token: fmu1-xxxxxxxx-xxxxxxxxxxxxxxxx }
+    to: !LocalGit { path: /backups/mail/personal }
+    ping:
+      # Sentry distinguishes states with a query string …
+      start: https://sentry.io/api/0/monitors/personal/<key>/?status=in_progress
+      success: https://sentry.io/api/0/monitors/personal/<key>/?status=ok
+      fail: https://sentry.io/api/0/monitors/personal/<key>/?status=error
+      # … while Healthchecks.io uses a path suffix:
+      # start: https://hc-ping.com/<uuid>/start
+      # success: https://hc-ping.com/<uuid>
+      # fail: https://hc-ping.com/<uuid>/fail
+```
 
 ## Restore policy fields
 

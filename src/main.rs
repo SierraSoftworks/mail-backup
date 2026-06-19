@@ -13,6 +13,7 @@ mod engine;
 mod entities;
 mod errors;
 pub(crate) mod helpers;
+mod monitor;
 mod policy;
 mod restore;
 mod sources;
@@ -79,6 +80,7 @@ async fn run(cli: Cli, session: &Session) -> Result<(), Error> {
                 async move {
                     let mut source = sources::jmap::JmapMailSource::from_config(&policy.from);
                     let mut store = stores::AnyStore::from_config(&policy.to);
+                    let monitor = monitor::Monitor::new(policy.ping.clone());
                     engine::stream::run(
                         name,
                         &mut source,
@@ -86,6 +88,7 @@ async fn run(cli: Cli, session: &Session) -> Result<(), Error> {
                         policy,
                         &options,
                         &stream_options,
+                        &monitor,
                         schedule,
                         &CANCEL,
                     )
@@ -146,6 +149,7 @@ async fn run(cli: Cli, session: &Session) -> Result<(), Error> {
             }
 
             for (name, policy) in selected {
+                let monitor = monitor::Monitor::new(policy.ping.clone());
                 let span = info_span!(
                     "backup.policy",
                     policy = %name,
@@ -163,13 +167,31 @@ async fn run(cli: Cli, session: &Session) -> Result<(), Error> {
                 );
                 async {
                     info!("Backing up '{}' ({})", name, policy);
+                    monitor.started().await;
 
                     let mut source = sources::jmap::JmapMailSource::from_config(&policy.from);
                     let mut store = stores::AnyStore::from_config(&policy.to);
-                    let summary =
-                        engine::run_backup(&mut source, &mut store, policy, &options, &CANCEL)
-                            .await?;
+                    let summary = match engine::run_backup(
+                        &mut source,
+                        &mut store,
+                        policy,
+                        &options,
+                        &CANCEL,
+                    )
+                    .await
+                    {
+                        Ok(summary) => summary,
+                        Err(e) => {
+                            monitor.failed().await;
+                            return Err(e);
+                        }
+                    };
                     summary.record_span(&Span::current());
+                    // A run cut short by shutdown is neither a success nor a
+                    // failure; it resumes on the next run, so report nothing.
+                    if !summary.interrupted {
+                        monitor.succeeded().await;
+                    }
                     info!("Backup of '{}' complete: {}", name, summary);
                     Ok::<(), Error>(())
                 }
@@ -291,11 +313,16 @@ async fn run(cli: Cli, session: &Session) -> Result<(), Error> {
                     Ok(state) => {
                         let mailboxes = source.list_mailboxes().await?;
                         info!(
-                            " - backup '{}' ({}): OK (account {}, {} mailboxes)",
+                            " - backup '{}' ({}): OK (account {}, {} mailboxes){}",
                             name,
                             policy,
                             state.account_id,
-                            mailboxes.len()
+                            mailboxes.len(),
+                            if policy.ping.is_enabled() {
+                                ", cron monitoring enabled"
+                            } else {
+                                ""
+                            }
                         );
                     }
                     Err(e) => {
