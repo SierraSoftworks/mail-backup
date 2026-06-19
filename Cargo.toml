@@ -47,7 +47,9 @@ tracing = "0.1.44"
 tracing-batteries = { git = "https://github.com/sierrasoftworks/tracing-batteries-rs.git", features = ["opentelemetry"] }
 unicase = "2.9.0"
 unicode-normalization = "0.1.24"
-url = "2.5.7"
+# The serde feature lets monitor endpoints in the config deserialize straight
+# into validated `url::Url` values.
+url = { version = "2.5.7", features = ["serde"] }
 
 [dev-dependencies]
 http = "1.4.1"

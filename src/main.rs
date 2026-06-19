@@ -13,6 +13,7 @@ mod engine;
 mod entities;
 mod errors;
 pub(crate) mod helpers;
+mod ping;
 mod policy;
 mod restore;
 mod sources;
@@ -146,6 +147,7 @@ async fn run(cli: Cli, session: &Session) -> Result<(), Error> {
             }
 
             for (name, policy) in selected {
+                let pinger = ping::Pinger::new(policy.ping.clone());
                 let span = info_span!(
                     "backup.policy",
                     policy = %name,
@@ -166,9 +168,13 @@ async fn run(cli: Cli, session: &Session) -> Result<(), Error> {
 
                     let mut source = sources::jmap::JmapMailSource::from_config(&policy.from);
                     let mut store = stores::AnyStore::from_config(&policy.to);
-                    let summary =
-                        engine::run_backup(&mut source, &mut store, policy, &options, &CANCEL)
-                            .await?;
+                    let run =
+                        engine::run_backup(&mut source, &mut store, policy, &options, &CANCEL);
+                    // The pass is wrapped in a start/success/failure ping (an
+                    // interrupted run reports neither and resumes next time).
+                    let summary = pinger
+                        .observe(run, engine::BackupSummary::completed)
+                        .await?;
                     summary.record_span(&Span::current());
                     info!("Backup of '{}' complete: {}", name, summary);
                     Ok::<(), Error>(())

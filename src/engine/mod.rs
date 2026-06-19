@@ -93,6 +93,14 @@ impl BackupSummary {
         self.added + self.moved + self.updated + self.removed
     }
 
+    /// Whether the run reached a consistent end state rather than being cut
+    /// short by a shutdown. Used to decide whether to report success to a cron
+    /// monitor — an interrupted run resumes later, so it is reported as neither
+    /// success nor failure.
+    pub fn completed(&self) -> bool {
+        !self.interrupted
+    }
+
     /// Records the summary's counters as attributes on a span. The span must
     /// have declared the matching fields (initially [`EmptyField`]): `added`,
     /// `moved`, `updated`, `removed`, `unchanged`, `skipped`, `interrupted`.

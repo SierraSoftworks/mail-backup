@@ -23,6 +23,7 @@ use tracing_batteries::prelude::*;
 use super::{BackupSummary, EngineOptions, cancelled, sync};
 use crate::BackupPolicy;
 use crate::entities::mail::SourceNotification;
+use crate::ping::Pinger;
 use crate::sources::MailSource;
 use crate::stores::MailStore;
 
@@ -68,6 +69,10 @@ pub enum StreamEnd {
 
 /// Runs the daemon for a single policy: an initial backup pass (backfill
 /// and/or catch-up), then the streaming loop with reconnection.
+///
+/// Each full backup pass is reported to the policy's cron `ping` endpoints; the
+/// live streaming syncs in between are intentionally not, as a cron monitor
+/// tracks scheduled runs rather than every incremental change.
 #[allow(clippy::too_many_arguments)]
 pub async fn run<S: MailSource, T: MailStore>(
     name: &str,
@@ -79,6 +84,7 @@ pub async fn run<S: MailSource, T: MailStore>(
     schedule: Option<&croner::Cron>,
     cancel: &AtomicBool,
 ) -> Result<(), human_errors::Error> {
+    let pinger = Pinger::new(policy.ping.clone());
     let mut backoff = stream_options.reconnect_min;
 
     while !cancelled(cancel) {
@@ -102,10 +108,16 @@ pub async fn run<S: MailSource, T: MailStore>(
             interrupted = EmptyField,
             error = EmptyField,
         );
-        match super::run_backup(source, store, policy, options, cancel)
-            .instrument(span.clone())
-            .await
-        {
+        // The backup pass is wrapped in a `start`/`success`/`failure` ping; an
+        // interrupted pass (clean shutdown) is reported as neither, since it
+        // resumes on the next run.
+        let outcome = pinger
+            .observe(
+                super::run_backup(source, store, policy, options, cancel).instrument(span.clone()),
+                BackupSummary::completed,
+            )
+            .await;
+        match outcome {
             Ok(summary) => {
                 summary.record_span(&span);
                 if summary.changes() > 0 {

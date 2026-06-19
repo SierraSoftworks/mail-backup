@@ -3,6 +3,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::path::PathBuf;
 
 use crate::Filter;
+use crate::ping::PingConfig;
 
 /// A mail service which messages can be backed up from, and restored to.
 ///
@@ -134,6 +135,10 @@ pub struct BackupPolicy {
     /// The earliest day of mail (by receivedAt) to include when backfilling.
     #[serde(default)]
     pub backfill_start: Option<chrono::NaiveDate>,
+    /// HTTP cron-monitoring endpoints pinged as each scheduled backup run for
+    /// this policy starts, succeeds, or fails.
+    #[serde(default)]
+    pub ping: PingConfig,
 }
 
 impl Display for BackupPolicy {
@@ -230,6 +235,62 @@ mod tests {
             format!("{}", policy),
             "Fastmail(user@example.com) -> LocalGit(/backup/mail)"
         );
+    }
+
+    #[test]
+    fn deserialize_backup_policy_with_ping() {
+        let policy = r#"
+          from: !Fastmail { token: fmu1-secret }
+          to: !LocalDir { path: /backup/mail }
+          ping:
+            start: https://sentry.io/api/0/cron/personal/key/?status=in_progress
+            success: https://sentry.io/api/0/cron/personal/key/?status=ok
+            failure: https://sentry.io/api/0/cron/personal/key/?status=error
+        "#;
+        let policy: BackupPolicy = serde_yaml::from_str(policy).unwrap();
+        assert_eq!(
+            policy.ping.start.as_ref().unwrap().as_str(),
+            "https://sentry.io/api/0/cron/personal/key/?status=in_progress"
+        );
+        assert_eq!(
+            policy.ping.success.as_ref().unwrap().as_str(),
+            "https://sentry.io/api/0/cron/personal/key/?status=ok"
+        );
+        assert_eq!(
+            policy.ping.failure.as_ref().unwrap().as_str(),
+            "https://sentry.io/api/0/cron/personal/key/?status=error"
+        );
+    }
+
+    #[test]
+    fn ping_defaults_to_disabled() {
+        let policy: BackupPolicy = serde_yaml::from_str(
+            "from: !Fastmail { token: x }\nto: !LocalDir { path: /backup/mail }",
+        )
+        .unwrap();
+        assert_eq!(policy.ping, PingConfig::default());
+    }
+
+    #[test]
+    fn deserialize_partial_ping() {
+        let policy: BackupPolicy = serde_yaml::from_str(
+            "from: !Fastmail { token: x }\nto: !LocalDir { path: /x }\nping:\n  failure: https://example.com/fail",
+        )
+        .unwrap();
+        assert!(policy.ping.start.is_none());
+        assert!(policy.ping.success.is_none());
+        assert_eq!(
+            policy.ping.failure.as_ref().unwrap().as_str(),
+            "https://example.com/fail"
+        );
+    }
+
+    #[test]
+    fn invalid_ping_url_fails_to_deserialize() {
+        let result = serde_yaml::from_str::<BackupPolicy>(
+            "from: !Fastmail { token: x }\nto: !LocalDir { path: /x }\nping:\n  start: \"not a url\"",
+        );
+        assert!(result.is_err(), "an unparseable ping URL should fail");
     }
 
     #[test]

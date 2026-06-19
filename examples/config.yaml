@@ -25,6 +25,14 @@ backups:
     filter: '!(message.keywords contains "$junk")'
     # Optionally limit how far back the initial backfill reaches.
     backfill_start: 2008-01-01
+    # Optionally report each scheduled backup run to an HTTP cron monitor
+    # (e.g. Sentry Crons, Healthchecks.io). Each state has its own URL and is
+    # fetched with a plain GET; any state you omit is simply not reported.
+    # Live streaming syncs are not reported — only full backup runs are.
+    ping:
+      start: https://sentry.io/api/0/monitors/personal/<key>/?status=in_progress
+      success: https://sentry.io/api/0/monitors/personal/<key>/?status=ok
+      failure: https://sentry.io/api/0/monitors/personal/<key>/?status=error
 
   # Back up recent mail from any other JMAP provider into a plain directory.
   # The URL is the server's base URL; the standard /.well-known/jmap session
