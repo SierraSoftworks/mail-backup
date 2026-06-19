@@ -677,6 +677,12 @@ impl MailStore for DirMailStore {
         self.path_edits.clear();
         Ok(())
     }
+
+    async fn save_state(&mut self) -> Result<(), human_errors::Error> {
+        self.persistence.save_state(&self.state)?;
+        self.persistence.save_index(&self.index)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

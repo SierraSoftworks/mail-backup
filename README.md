@@ -39,7 +39,8 @@ restores:
    chronologically, committing one backdated snapshot per day; afterwards the daemon
    streams changes from the server in real time (JMAP websocket push, EventSource, or
    state polling — whichever the server supports, in that order) and amends the current
-   day's commit as mail arrives.
+   day's commit as mail arrives. On the configured `schedule` it also runs a full snapshot
+   refresh that re-enumerates the server, catching anything the live stream missed.
  - **Full fidelity.** Every message is stored as its raw RFC 5322 bytes (headers and
    attachments included) plus a metadata sidecar capturing all of its mailboxes, keywords
    (read/unread, flagged, …), and received date. Moves between folders become git renames;

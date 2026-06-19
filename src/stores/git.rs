@@ -576,6 +576,12 @@ impl MailStore for GitMailStore {
 
         Ok(())
     }
+
+    async fn save_state(&mut self) -> Result<(), human_errors::Error> {
+        // Persist state and index only; any pending worktree edits stay queued
+        // for the next checkpoint rather than producing a commit here.
+        self.inner.save_state().await
+    }
 }
 
 #[cfg(test)]

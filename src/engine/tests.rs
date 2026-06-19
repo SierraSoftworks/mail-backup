@@ -365,6 +365,103 @@ async fn state_too_old_triggers_full_reconciliation() {
 }
 
 #[tokio::test]
+async fn refresh_recovers_changes_the_event_stream_missed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut source = scripted_source();
+    let mut store = GitMailStore::new(dir.path().to_path_buf(), None, None);
+
+    run_backup(
+        &mut source,
+        &mut store,
+        &policy(None),
+        &options(),
+        &NO_CANCEL,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !store
+            .lookup("M1")
+            .unwrap()
+            .meta
+            .keywords
+            .contains("$flagged")
+    );
+
+    // The server flags M1 but never records it on the change feed, so neither
+    // the event stream nor a changes-based catch-up can see it.
+    source.update_message_silently(meta(
+        "M1",
+        &["mb-inbox"],
+        &["$seen", "$flagged"],
+        "2023-01-01T08:00:00Z",
+    ));
+
+    // A changes-based pass finds nothing and the stale metadata persists.
+    let summary = run_backup(
+        &mut source,
+        &mut store,
+        &policy(None),
+        &options(),
+        &NO_CANCEL,
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.changes(), 0, "{summary}");
+    assert!(
+        !store
+            .lookup("M1")
+            .unwrap()
+            .meta
+            .keywords
+            .contains("$flagged")
+    );
+
+    // A snapshot refresh re-enumerates the server and reconciles, catching it.
+    let summary = run_refresh(
+        &mut source,
+        &mut store,
+        &policy(None),
+        &options(),
+        &NO_CANCEL,
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.updated, 1, "{summary}");
+    assert!(
+        store
+            .lookup("M1")
+            .unwrap()
+            .meta
+            .keywords
+            .contains("$flagged")
+    );
+}
+
+#[tokio::test]
+async fn refresh_backfills_a_store_that_never_completed_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut source = scripted_source();
+    let mut store = GitMailStore::new(dir.path().to_path_buf(), None, None);
+
+    // With no prior backfill there is nothing to reconcile against, so the
+    // refresh runs the backfill instead.
+    let summary = run_refresh(
+        &mut source,
+        &mut store,
+        &policy(None),
+        &options(),
+        &NO_CANCEL,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(summary.added, 3, "{summary}");
+    assert!(store.state().backfill.is_none(), "backfill completed");
+    assert!(store.lookup("M1").is_some());
+}
+
+#[tokio::test]
 async fn account_mismatch_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let mut source = scripted_source();
