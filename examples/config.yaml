@@ -3,6 +3,11 @@
 # the archive. It runs alongside the real-time event stream and a 6-hour
 # changes-based catch-up, and catches anything the stream's change feed missed.
 # Each scheduled refresh is reported to the `ping` endpoints below.
+#
+# A daily (or weekly, e.g. "0 6 * * 0") cadence is recommended: the refresh is a
+# metadata-only scan whose cost grows with the mailbox size, and it is only a
+# safety net — streaming keeps the archive current far more frequently, so the
+# refresh just needs to catch the rare change the server's change feed dropped.
 schedule: "0 6 * * *"
 
 # Backup policies are keyed by a name of your choosing, which is used to

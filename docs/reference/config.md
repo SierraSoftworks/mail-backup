@@ -39,6 +39,16 @@ anything the server failed to record there. Each scheduled refresh is reported t
 policy's [`ping`](#cron-monitoring-ping) endpoints. With no schedule configured the 6-hour
 catch-up still runs, but no full refresh does.
 
+A **daily or weekly** cadence (e.g. `0 6 * * *` for 6 a.m. daily, or `0 6 * * 0` for
+weekly on Sunday) is recommended. The refresh is a metadata-only enumeration — it lists
+every message and compares it against the archive, but never re-downloads message bodies
+it already holds — so its cost scales with the size of the mailbox, not the schedule. It
+is a safety net, not the primary sync: the real-time stream and the 6-hour catch-up keep
+the archive current between refreshes on a far more frequent cadence, so the schedule only
+needs to be frequent enough to catch the rare change the server's change feed missed.
+Avoid sub-hourly schedules on large mailboxes, where a full enumeration every few minutes
+adds needless load for little benefit.
+
 ## Sources (`from:` in backups, `to:` in restores)
 Sources describe a mail account, written as YAML tagged values. Credentials are part of
 the source itself.

@@ -41,6 +41,13 @@ never lose data. In addition:
   cursor, so it catches anything they missed. It never re-downloads messages it already
   holds, and (like the initial pass) it is reported to the policy's [`ping`](../reference/config.md#cron-monitoring-ping)
   endpoints. With no schedule configured, only the 6-hour catch-up applies.
+
+  A **daily or weekly** schedule is the sweet spot. The refresh is a metadata-only
+  enumeration whose cost scales with the size of the mailbox, and it is only a safety net —
+  the real-time stream and the 6-hour catch-up already keep the archive current on a much
+  more frequent cadence, so the refresh just needs to run often enough to catch the rare
+  change the server's change feed dropped. There is little to gain from running it more
+  than a few times a day, and a sub-hourly schedule on a large mailbox is mostly wasted work.
 - If the server can no longer compute changes from our saved state (for example after a
   very long offline period), the daemon automatically falls back to a full reconciliation,
   which never re-downloads messages it already holds.
