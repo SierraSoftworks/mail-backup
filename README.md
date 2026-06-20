@@ -33,6 +33,14 @@ restores:
       token: fmu1-yyyyyyyy-yyyyyyyyyyyyyyyy
 ```
 
+## Installation
+
+Install with [Homebrew](https://brew.sh):
+
+```sh
+brew install sierrasoftworks/tap/mail-backup
+```
+
 ## Features
 
  - **Daily snapshots, as git commits.** The initial backfill walks your mail history
