@@ -21,6 +21,14 @@ For Fastmail, create an API token at
 For other JMAP providers, any bearer token with mail access works; configure the provider's
 base URL with the `!Jmap` source.
 
+## Installation
+
+Install with [Homebrew](https://brew.sh):
+
+```sh
+brew install sierrasoftworks/tap/mail-backup
+```
+
 ## Your first backup
 
 Create a `config.yaml`:
