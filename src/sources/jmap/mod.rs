@@ -81,7 +81,7 @@ impl JmapMailSource {
         position: i32,
     ) -> Result<Vec<String>, jmap_client::Error> {
         let client = self.client().expect("checked by callers");
-        let mut request = client.inner().build();
+        let mut request = client.build();
         {
             let query = request.query_email();
 
@@ -125,7 +125,7 @@ impl JmapMailSource {
     ) -> Result<Vec<MessageMeta>, human_errors::Error> {
         let client = self.client()?;
         let emails = retry("Fetching message metadata", || async {
-            let mut request = client.inner().build();
+            let mut request = client.build();
             request
                 .get_email()
                 .ids(ids.iter().cloned())
@@ -168,7 +168,7 @@ impl MailSource for JmapMailSource {
     async fn list_mailboxes(&self) -> Result<Vec<MailboxInfo>, human_errors::Error> {
         let client = self.client()?;
         let mailboxes = retry("Listing mailboxes", || async {
-            let mut request = client.inner().build();
+            let mut request = client.build();
             request.get_mailbox().properties([
                 jmap_client::mailbox::Property::Id,
                 jmap_client::mailbox::Property::Name,
@@ -245,8 +245,12 @@ impl MailSource for JmapMailSource {
             return Ok(ChangesResult::StateTooOld);
         };
 
-        let email_changes = match retry("Fetching mail changes", || {
-            client.inner().email_changes(email_state.clone(), None)
+        // Built by hand rather than via the `email_changes` convenience
+        // method so the request advertises only our constrained `using` set.
+        let email_changes = match retry("Fetching mail changes", || async {
+            let mut request = client.build();
+            request.changes_email(email_state.clone());
+            request.send_changes_email().await
         })
         .await
         {
@@ -272,7 +276,7 @@ impl MailSource for JmapMailSource {
                     // `maxChanges` argument, and RFC 8620 requires it to be a
                     // *positive* integer when present (Fastmail rejects 0).
                     match retry("Fetching mailbox changes", || async {
-                        let mut request = client.inner().build();
+                        let mut request = client.build();
                         request.changes_mailbox(current.clone());
                         request.send_changes_mailbox().await
                     })
@@ -415,6 +419,41 @@ mod tests {
             message.contains("credentials") || message.contains("token"),
             "got: {message}"
         );
+    }
+
+    #[tokio::test]
+    async fn requests_advertise_only_core_and_mail_capabilities() {
+        let (server, client) = test_client().await;
+
+        // Every request must advertise exactly the core and mail capabilities.
+        // jmap-client 0.4.2's default `using` set additionally lists
+        // submission, vacationresponse, contacts, calendars, websocket, sieve,
+        // blob, quota, and principals — capabilities Fastmail does not support,
+        // which it rejects with a bare 400 Bad Request. If the constrained set
+        // regresses, the body matcher below stops matching and this request
+        // fails with no mock to serve it.
+        Mock::given(method("POST"))
+            .and(path("/api"))
+            .and(body_string_contains(
+                r#""using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]"#,
+            ))
+            .and(BodyNotContains("urn:ietf:params:jmap:principals"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(method_response(
+                "Email/get",
+                json!({
+                    "accountId": "acc-primary",
+                    "state": "email-state-1",
+                    "list": [],
+                    "notFound": []
+                }),
+            )))
+            .mount(&server)
+            .await;
+
+        client
+            .email_state()
+            .await
+            .expect("the state probe must advertise only core + mail");
     }
 
     #[tokio::test]

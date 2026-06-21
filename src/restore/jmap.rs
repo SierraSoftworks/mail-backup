@@ -2,6 +2,7 @@
 //! raw messages via blob upload + Email/import, preserving keywords, mailbox
 //! memberships, and the original receivedAt timestamps.
 
+use jmap_client::core::set::SetObject;
 use tracing_batteries::prelude::*;
 
 use super::RestoreTarget;
@@ -72,7 +73,7 @@ impl RestoreTarget for JmapRestoreTarget {
     async fn list_mailboxes(&self) -> Result<Vec<MailboxInfo>, human_errors::Error> {
         let client = self.client()?;
         let mailboxes = retry("Listing mailboxes", || async {
-            let mut request = client.inner().build();
+            let mut request = client.build();
             request.get_mailbox().properties([
                 jmap_client::mailbox::Property::Id,
                 jmap_client::mailbox::Property::Name,
@@ -98,10 +99,22 @@ impl RestoreTarget for JmapRestoreTarget {
         role: Option<&str>,
     ) -> Result<String, human_errors::Error> {
         let client = self.client()?;
-        let mut mailbox = retry("Creating a mailbox", || {
-            client
-                .inner()
-                .mailbox_create(name, parent_id, role_from_string(role))
+        // Built by hand rather than via the `mailbox_create` convenience
+        // method so the request advertises only our constrained `using` set.
+        let mut mailbox = retry("Creating a mailbox", || async {
+            let mut request = client.build();
+            let create_id = request
+                .set_mailbox()
+                .create()
+                .name(name)
+                .role(role_from_string(role))
+                .parent_id(parent_id)
+                .create_id()
+                .expect("set_mailbox().create() always assigns a create id");
+            request
+                .send_single::<jmap_client::core::response::MailboxSetResponse>()
+                .await?
+                .created(&create_id)
         })
         .await
         .map_err(|e| e.to_human_error())?;
@@ -131,7 +144,7 @@ impl RestoreTarget for JmapRestoreTarget {
         let ids = retry("Checking for an existing message", || {
             let filter = filter.clone();
             async {
-                let mut request = client.inner().build();
+                let mut request = client.build();
                 {
                     let query = request.query_email();
                     query.filter(filter);
@@ -159,20 +172,40 @@ impl RestoreTarget for JmapRestoreTarget {
     ) -> Result<String, human_errors::Error> {
         let client = self.client()?;
 
-        // Always pass receivedAt explicitly: some servers default it to the
-        // import time when omitted, destroying the original date.
         // No automatic retry here — an import retried after an ambiguous
         // failure could duplicate the message; re-running the restore (with
         // dedupe) is the safe retry path.
-        let mut email = client
+        //
+        // Built by hand rather than via the `email_import` convenience method
+        // so the Email/import request advertises only our constrained `using`
+        // set. The blob upload is a plain HTTP POST that carries no `using`,
+        // so it keeps using the client helper directly.
+        let blob_id = client
             .inner()
-            .email_import(
-                raw,
-                mailbox_ids,
-                Some(keywords),
-                Some(received_at.timestamp()),
-            )
+            .upload(None, raw, None)
             .await
+            .map_err(|e| e.to_human_error())?
+            .take_blob_id();
+
+        let mut request = client.build();
+        let create_id = {
+            let import = request
+                .import_email()
+                .account_id(client.account_id())
+                .email(blob_id)
+                .mailbox_ids(mailbox_ids);
+            import.keywords(keywords);
+            // Always pass receivedAt explicitly: some servers default it to
+            // the import time when omitted, destroying the original date.
+            import.received_at(received_at.timestamp());
+            import.create_id()
+        };
+
+        let mut email = request
+            .send_single::<jmap_client::email::import::EmailImportResponse>()
+            .await
+            .map_err(|e| e.to_human_error())?
+            .created(&create_id)
             .map_err(|e| e.to_human_error())?;
 
         Ok(email.take_id())
