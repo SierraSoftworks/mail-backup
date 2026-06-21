@@ -11,6 +11,20 @@ use crate::errors::HumanizableError;
 /// The maximum number of attempts for a transient-failing request.
 const MAX_ATTEMPTS: u32 = 5;
 
+/// The JMAP capabilities advertised in every request's `using` array.
+///
+/// jmap-client 0.4.2 began advertising eleven capabilities by default
+/// (submission, vacationresponse, contacts, calendars, websocket, sieve,
+/// blob, quota, principals on top of core and mail). RFC 8620 §3.3 requires
+/// the server to recognise every capability named in `using`, and Fastmail
+/// rejects any it does not support — but with a bare `400 Bad Request` rather
+/// than the `urn:ietf:params:jmap:error:unknownCapability` problem document
+/// the spec prescribes, so the failure surfaces only as an opaque
+/// "Server failed: 400 Bad Request". Backup and restore touch nothing beyond
+/// the core and mail capabilities, so we pin the set to those two — restoring
+/// jmap-client 0.4.1's behaviour.
+const USING: &[jmap_client::URI] = &[jmap_client::URI::Core, jmap_client::URI::Mail];
+
 pub struct MailClient {
     client: jmap_client::client::Client,
     max_objects_in_get: usize,
@@ -115,10 +129,21 @@ impl MailClient {
         &self.client
     }
 
+    /// Builds a JMAP request whose `using` array is constrained to the
+    /// capabilities we actually rely on (see [`USING`]).
+    ///
+    /// Always prefer this over `self.inner().build()`: the latter advertises
+    /// every capability jmap-client knows about, which Fastmail rejects.
+    pub fn build(&self) -> jmap_client::core::request::Request<'_> {
+        let mut request = self.client.build();
+        request.using = USING.to_vec();
+        request
+    }
+
     /// The server's current Email state string (an Email/get with no ids).
     pub async fn email_state(&self) -> Result<String, human_errors::Error> {
         retry("Fetching the mail state", || async {
-            let mut request = self.client.build();
+            let mut request = self.build();
             request.get_email().ids(Vec::<String>::new());
             request
                 .send_single::<jmap_client::core::response::EmailGetResponse>()
@@ -132,7 +157,7 @@ impl MailClient {
     /// The server's current Mailbox state string.
     pub async fn mailbox_state(&self) -> Result<String, human_errors::Error> {
         retry("Fetching the mailbox state", || async {
-            let mut request = self.client.build();
+            let mut request = self.build();
             request.get_mailbox().ids(Vec::<String>::new());
             request
                 .send_single::<jmap_client::core::response::MailboxGetResponse>()
