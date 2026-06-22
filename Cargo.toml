@@ -19,7 +19,7 @@ ctrlc = { version = "3.5.2", features = ["termination"] }
 # provides the `Deserialize` impl for `Filter` used in policy configuration.
 filt-rs = { version = "1.0.0", features = ["serde"] }
 futures = "0.3.31"
-gix = { version = "0.84.0", features = ["tree-editor"] }
+gix = { version = "0.85.0", features = ["tree-editor"] }
 human-errors = { version = "0.2.3", features = ["pretty"] }
 jmap-client = "0.4.1"
 pin-project = "1.1.13"
