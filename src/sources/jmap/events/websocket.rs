@@ -233,6 +233,11 @@ mod tests {
             ws.send(Message::Close(None))
                 .await
                 .expect("the close sends");
+            // Complete the close handshake by reading until the client's
+            // Close reply ends the stream. Dropping the socket with that
+            // reply still in flight makes Windows send an RST, which the
+            // client sees as WSAECONNABORTED instead of a clean EOF.
+            while ws.next().await.is_some() {}
 
             (authorization, protocol, push_enable)
         });
