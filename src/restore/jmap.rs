@@ -8,7 +8,7 @@ use tracing_batteries::prelude::*;
 use super::RestoreTarget;
 use crate::entities::mail::{MailboxInfo, MessageMeta};
 use crate::errors::HumanizableError;
-use crate::helpers::jmap::{MailClient, mailbox_to_info, retry};
+use crate::helpers::jmap::{MailClient, mailbox_to_info};
 use crate::policy::SourceConfig;
 
 pub struct JmapRestoreTarget {
@@ -72,22 +72,23 @@ impl RestoreTarget for JmapRestoreTarget {
 
     async fn list_mailboxes(&self) -> Result<Vec<MailboxInfo>, human_errors::Error> {
         let client = self.client()?;
-        let mailboxes = retry("Listing mailboxes", || async {
-            let mut request = client.build();
-            request.get_mailbox().properties([
-                jmap_client::mailbox::Property::Id,
-                jmap_client::mailbox::Property::Name,
-                jmap_client::mailbox::Property::ParentId,
-                jmap_client::mailbox::Property::Role,
-                jmap_client::mailbox::Property::SortOrder,
-            ]);
-            request
-                .send_single::<jmap_client::core::response::MailboxGetResponse>()
-                .await
-                .map(|mut r| r.take_list())
-        })
-        .await
-        .map_err(|e| e.to_human_error())?;
+        let mailboxes = client
+            .retry("Listing mailboxes", || async {
+                let mut request = client.build();
+                request.get_mailbox().properties([
+                    jmap_client::mailbox::Property::Id,
+                    jmap_client::mailbox::Property::Name,
+                    jmap_client::mailbox::Property::ParentId,
+                    jmap_client::mailbox::Property::Role,
+                    jmap_client::mailbox::Property::SortOrder,
+                ]);
+                request
+                    .send_single::<jmap_client::core::response::MailboxGetResponse>()
+                    .await
+                    .map(|mut r| r.take_list())
+            })
+            .await
+            .map_err(|e| e.to_human_error())?;
 
         Ok(mailboxes.iter().map(mailbox_to_info).collect())
     }
@@ -101,23 +102,24 @@ impl RestoreTarget for JmapRestoreTarget {
         let client = self.client()?;
         // Built by hand rather than via the `mailbox_create` convenience
         // method so the request advertises only our constrained `using` set.
-        let mut mailbox = retry("Creating a mailbox", || async {
-            let mut request = client.build();
-            let create_id = request
-                .set_mailbox()
-                .create()
-                .name(name)
-                .role(role_from_string(role))
-                .parent_id(parent_id)
-                .create_id()
-                .expect("set_mailbox().create() always assigns a create id");
-            request
-                .send_single::<jmap_client::core::response::MailboxSetResponse>()
-                .await?
-                .created(&create_id)
-        })
-        .await
-        .map_err(|e| e.to_human_error())?;
+        let mut mailbox = client
+            .retry("Creating a mailbox", || async {
+                let mut request = client.build();
+                let create_id = request
+                    .set_mailbox()
+                    .create()
+                    .name(name)
+                    .role(role_from_string(role))
+                    .parent_id(parent_id)
+                    .create_id()
+                    .expect("set_mailbox().create() always assigns a create id");
+                request
+                    .send_single::<jmap_client::core::response::MailboxSetResponse>()
+                    .await?
+                    .created(&create_id)
+            })
+            .await
+            .map_err(|e| e.to_human_error())?;
 
         let id = mailbox.take_id();
         debug!("Created mailbox {} ({})", name, id);
@@ -141,24 +143,25 @@ impl RestoreTarget for JmapRestoreTarget {
             ]),
         };
 
-        let ids = retry("Checking for an existing message", || {
-            let filter = filter.clone();
-            async {
-                let mut request = client.build();
-                {
-                    let query = request.query_email();
-                    query.filter(filter);
-                    query.limit(1);
-                    query.calculate_total(false);
+        let ids = client
+            .retry("Checking for an existing message", || {
+                let filter = filter.clone();
+                async {
+                    let mut request = client.build();
+                    {
+                        let query = request.query_email();
+                        query.filter(filter);
+                        query.limit(1);
+                        query.calculate_total(false);
+                    }
+                    request
+                        .send_single::<jmap_client::core::query::QueryResponse>()
+                        .await
+                        .map(|mut r| r.take_ids())
                 }
-                request
-                    .send_single::<jmap_client::core::query::QueryResponse>()
-                    .await
-                    .map(|mut r| r.take_ids())
-            }
-        })
-        .await
-        .map_err(|e| e.to_human_error())?;
+            })
+            .await
+            .map_err(|e| e.to_human_error())?;
 
         Ok(!ids.is_empty())
     }

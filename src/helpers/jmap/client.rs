@@ -1,15 +1,11 @@
 //! A thin wrapper around [`jmap_client::Client`] handling connection setup,
-//! account selection, and retries with exponential backoff.
+//! account selection, and resilience: every request runs through the shared
+//! retry/circuit-breaker machinery in [`crate::helpers::resilience`].
 
 use std::future::Future;
-use std::time::Duration;
-
-use tracing_batteries::prelude::*;
 
 use crate::errors::HumanizableError;
-
-/// The maximum number of attempts for a transient-failing request.
-const MAX_ATTEMPTS: u32 = 5;
+use crate::helpers::resilience::{self, CircuitBreaker, RetryError, RetryPolicy};
 
 /// The JMAP capabilities advertised in every request's `using` array.
 ///
@@ -28,33 +24,50 @@ const USING: &[jmap_client::URI] = &[jmap_client::URI::Core, jmap_client::URI::M
 pub struct MailClient {
     client: jmap_client::client::Client,
     max_objects_in_get: usize,
+    retry_policy: RetryPolicy,
+    /// Shared by every request this client makes (API calls, blob
+    /// downloads and uploads, the initial connect), so repeated transient
+    /// failures anywhere pause all traffic to this server for a while
+    /// rather than hammering it from many independent retry loops.
+    breaker: CircuitBreaker,
 }
 
 impl MailClient {
     /// Connects to a JMAP session resource using a bearer token, optionally
     /// selecting a specific account by id or name (e-mail address).
+    /// Transient connection failures (TCP resets, 5xx responses, rate
+    /// limiting) are retried with backoff like any other request.
     pub async fn connect(
         session_url: &str,
         token: &str,
         account: Option<&str>,
     ) -> Result<Self, human_errors::Error> {
-        let mut builder = jmap_client::client::Client::new()
-            .credentials(jmap_client::client::Credentials::bearer(token));
+        let retry_policy = RetryPolicy::default();
+        let breaker = CircuitBreaker::default();
 
         // The client only follows redirects to explicitly trusted hosts, and
         // providers commonly redirect /.well-known/jmap to their session
         // resource (Fastmail does), so the server's own host must be trusted.
-        if let Some(host) = url::Url::parse(session_url)
+        let trusted_host = url::Url::parse(session_url)
             .ok()
-            .and_then(|u| u.host_str().map(str::to_string))
-        {
-            builder = builder.follow_redirects([host]);
-        }
+            .and_then(|u| u.host_str().map(str::to_string));
 
-        let client = builder
-            .connect(session_url)
-            .await
-            .map_err(|e| e.to_human_error())?;
+        let client = resilience::retry(
+            &retry_policy,
+            &breaker,
+            "Connecting to the mail server",
+            is_transient,
+            || async {
+                let mut builder = jmap_client::client::Client::new()
+                    .credentials(jmap_client::client::Credentials::bearer(token));
+                if let Some(host) = &trusted_host {
+                    builder = builder.follow_redirects([host.clone()]);
+                }
+                builder.connect(session_url).await
+            },
+        )
+        .await
+        .map_err(|e| e.to_human_error())?;
 
         let mut client = Self {
             max_objects_in_get: client
@@ -64,10 +77,34 @@ impl MailClient {
                 .unwrap_or(500)
                 .clamp(10, 4096),
             client,
+            retry_policy,
+            breaker,
         };
 
         client.select_account(account)?;
         Ok(client)
+    }
+
+    /// Runs a request against this client's server, retrying transient
+    /// failures with exponential backoff and coordinating with the client's
+    /// shared circuit breaker (see [`crate::helpers::resilience`]).
+    pub async fn retry<T, F, Fut>(
+        &self,
+        description: &str,
+        operation: F,
+    ) -> Result<T, RetryError<jmap_client::Error>>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, jmap_client::Error>>,
+    {
+        resilience::retry(
+            &self.retry_policy,
+            &self.breaker,
+            description,
+            is_transient,
+            operation,
+        )
+        .await
     }
 
     fn select_account(&mut self, account: Option<&str>) -> Result<(), human_errors::Error> {
@@ -142,7 +179,7 @@ impl MailClient {
 
     /// The server's current Email state string (an Email/get with no ids).
     pub async fn email_state(&self) -> Result<String, human_errors::Error> {
-        retry("Fetching the mail state", || async {
+        self.retry("Fetching the mail state", || async {
             let mut request = self.build();
             request.get_email().ids(Vec::<String>::new());
             request
@@ -156,7 +193,7 @@ impl MailClient {
 
     /// The server's current Mailbox state string.
     pub async fn mailbox_state(&self) -> Result<String, human_errors::Error> {
-        retry("Fetching the mailbox state", || async {
+        self.retry("Fetching the mailbox state", || async {
             let mut request = self.build();
             request.get_mailbox().ids(Vec::<String>::new());
             request
@@ -204,10 +241,10 @@ fn is_transient(error: &jmap_client::Error) -> bool {
     }
 }
 
-pub fn is_cannot_calculate_changes(error: &jmap_client::Error) -> bool {
+pub fn is_cannot_calculate_changes(error: &RetryError<jmap_client::Error>) -> bool {
     matches!(
-        error,
-        jmap_client::Error::Method(e) if matches!(
+        error.inner(),
+        Some(jmap_client::Error::Method(e)) if matches!(
             e.error(),
             jmap_client::core::error::MethodErrorType::CannotCalculateChanges
         )
@@ -233,39 +270,12 @@ pub fn is_keepalive_artifact(error: &jmap_client::Error) -> bool {
     )
 }
 
-pub fn is_anchor_not_found(error: &jmap_client::Error) -> bool {
+pub fn is_anchor_not_found(error: &RetryError<jmap_client::Error>) -> bool {
     matches!(
-        error,
-        jmap_client::Error::Method(e) if matches!(
+        error.inner(),
+        Some(jmap_client::Error::Method(e)) if matches!(
             e.error(),
             jmap_client::core::error::MethodErrorType::AnchorNotFound
         )
     )
-}
-
-/// Runs an operation, retrying transient failures with exponential backoff
-/// and jitterless doubling (0.5s, 1s, 2s, 4s).
-pub async fn retry<T, F, Fut>(description: &str, mut operation: F) -> Result<T, jmap_client::Error>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, jmap_client::Error>>,
-{
-    let mut delay = Duration::from_millis(500);
-    let mut attempt = 1;
-
-    loop {
-        match operation().await {
-            Ok(value) => return Ok(value),
-            Err(error) if attempt < MAX_ATTEMPTS && is_transient(&error) => {
-                warn!(
-                    "{} failed (attempt {}/{}): {}; retrying in {:?}",
-                    description, attempt, MAX_ATTEMPTS, error, delay
-                );
-                tokio::time::sleep(delay).await;
-                delay *= 2;
-                attempt += 1;
-            }
-            Err(error) => return Err(error),
-        }
-    }
 }

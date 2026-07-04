@@ -140,6 +140,24 @@ impl HumanizableError for jmap_client::Error {
     }
 }
 
+impl<E: HumanizableError> HumanizableError for crate::helpers::resilience::RetryError<E> {
+    fn to_human_error(self) -> human_errors::Error {
+        use crate::helpers::resilience::RetryError;
+        match self {
+            RetryError::Operation(error) => error.to_human_error(),
+            RetryError::CircuitOpen { retry_after } => human_errors::system(
+                format!(
+                    "The remote server has been failing repeatedly, so requests to it are paused for the next {}s to give it a chance to recover.",
+                    retry_after.as_secs().max(1)
+                ),
+                &[
+                    "This usually indicates an outage or degradation on the remote server; the daemon will retry automatically, or you can re-run the command once the server has recovered.",
+                ],
+            ),
+        }
+    }
+}
+
 impl HumanizableError for filt_rs::Error {
     fn to_human_error(self) -> human_errors::Error {
         human_errors::wrap_user(
