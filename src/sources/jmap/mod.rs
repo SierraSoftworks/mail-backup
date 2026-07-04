@@ -19,7 +19,6 @@ use crate::entities::mail::{
 use crate::errors::HumanizableError;
 use crate::helpers::jmap::{
     MailClient, email_to_meta, is_anchor_not_found, is_cannot_calculate_changes, mailbox_to_info,
-    retry,
 };
 use crate::policy::SourceConfig;
 
@@ -124,19 +123,20 @@ impl JmapMailSource {
         ids: &[String],
     ) -> Result<Vec<MessageMeta>, human_errors::Error> {
         let client = self.client()?;
-        let emails = retry("Fetching message metadata", || async {
-            let mut request = client.build();
-            request
-                .get_email()
-                .ids(ids.iter().cloned())
-                .properties(backup_properties());
-            request
-                .send_single::<jmap_client::core::response::EmailGetResponse>()
-                .await
-                .map(|mut r| r.take_list())
-        })
-        .await
-        .map_err(|e| e.to_human_error())?;
+        let emails = client
+            .retry("Fetching message metadata", || async {
+                let mut request = client.build();
+                request
+                    .get_email()
+                    .ids(ids.iter().cloned())
+                    .properties(backup_properties());
+                request
+                    .send_single::<jmap_client::core::response::EmailGetResponse>()
+                    .await
+                    .map(|mut r| r.take_list())
+            })
+            .await
+            .map_err(|e| e.to_human_error())?;
 
         emails.iter().map(email_to_meta).collect()
     }
@@ -167,22 +167,23 @@ impl MailSource for JmapMailSource {
 
     async fn list_mailboxes(&self) -> Result<Vec<MailboxInfo>, human_errors::Error> {
         let client = self.client()?;
-        let mailboxes = retry("Listing mailboxes", || async {
-            let mut request = client.build();
-            request.get_mailbox().properties([
-                jmap_client::mailbox::Property::Id,
-                jmap_client::mailbox::Property::Name,
-                jmap_client::mailbox::Property::ParentId,
-                jmap_client::mailbox::Property::Role,
-                jmap_client::mailbox::Property::SortOrder,
-            ]);
-            request
-                .send_single::<jmap_client::core::response::MailboxGetResponse>()
-                .await
-                .map(|mut r| r.take_list())
-        })
-        .await
-        .map_err(|e| e.to_human_error())?;
+        let mailboxes = client
+            .retry("Listing mailboxes", || async {
+                let mut request = client.build();
+                request.get_mailbox().properties([
+                    jmap_client::mailbox::Property::Id,
+                    jmap_client::mailbox::Property::Name,
+                    jmap_client::mailbox::Property::ParentId,
+                    jmap_client::mailbox::Property::Role,
+                    jmap_client::mailbox::Property::SortOrder,
+                ]);
+                request
+                    .send_single::<jmap_client::core::response::MailboxGetResponse>()
+                    .await
+                    .map(|mut r| r.take_list())
+            })
+            .await
+            .map_err(|e| e.to_human_error())?;
 
         Ok(mailboxes.iter().map(mailbox_to_info).collect())
     }
@@ -204,7 +205,7 @@ impl MailSource for JmapMailSource {
                     break;
                 }
 
-                let ids = match retry("Enumerating messages", || {
+                let ids = match client.retry("Enumerating messages", || {
                     self.query_page(&range, anchor.as_deref(), position)
                 })
                 .await
@@ -247,12 +248,13 @@ impl MailSource for JmapMailSource {
 
         // Built by hand rather than via the `email_changes` convenience
         // method so the request advertises only our constrained `using` set.
-        let email_changes = match retry("Fetching mail changes", || async {
-            let mut request = client.build();
-            request.changes_email(email_state.clone());
-            request.send_changes_email().await
-        })
-        .await
+        let email_changes = match client
+            .retry("Fetching mail changes", || async {
+                let mut request = client.build();
+                request.changes_email(email_state.clone());
+                request.send_changes_email().await
+            })
+            .await
         {
             Ok(changes) => changes,
             Err(e) if is_cannot_calculate_changes(&e) => return Ok(ChangesResult::StateTooOld),
@@ -275,12 +277,13 @@ impl MailSource for JmapMailSource {
                     // convenience method: that method always sends a
                     // `maxChanges` argument, and RFC 8620 requires it to be a
                     // *positive* integer when present (Fastmail rejects 0).
-                    match retry("Fetching mailbox changes", || async {
-                        let mut request = client.build();
-                        request.changes_mailbox(current.clone());
-                        request.send_changes_mailbox().await
-                    })
-                    .await
+                    match client
+                        .retry("Fetching mailbox changes", || async {
+                            let mut request = client.build();
+                            request.changes_mailbox(current.clone());
+                            request.send_changes_mailbox().await
+                        })
+                        .await
                     {
                         Ok(changes) => {
                             mailboxes_changed |= !changes.created().is_empty()
@@ -330,7 +333,8 @@ impl MailSource for JmapMailSource {
         _cancel: &AtomicBool,
     ) -> Result<Vec<u8>, human_errors::Error> {
         let client = self.client()?;
-        retry("Downloading a message", || client.inner().download(blob_id))
+        client
+            .retry("Downloading a message", || client.inner().download(blob_id))
             .await
             .map_err(|e| e.to_human_error())
     }
@@ -823,6 +827,94 @@ mod tests {
             }),
             "got: {notifications:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn connect_retries_transient_session_failures() {
+        let server = MockServer::start().await;
+        mock_state_probes(&server).await;
+
+        // The session resource fails once with a 502 (a load balancer blip)
+        // before recovering; connect() must ride it out.
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jmap"))
+            .respond_with(ResponseTemplate::new(502))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jmap"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(session_json(&server.uri())))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+
+        let (_, state) = connected_source(&server, None).await;
+        assert_eq!(state.account_id, "acc-primary");
+    }
+
+    #[tokio::test]
+    async fn requests_retry_transient_server_errors() {
+        let server = MockServer::start().await;
+        mock_session(&server).await;
+
+        // The first Mailbox/get attempt hits a 503; the retry succeeds.
+        Mock::given(method("POST"))
+            .and(path("/api"))
+            .and(body_string_contains("Mailbox/get"))
+            .and(body_string_contains("properties"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api"))
+            .and(body_string_contains("Mailbox/get"))
+            .and(body_string_contains("properties"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(method_response(
+                "Mailbox/get",
+                json!({
+                    "accountId": "acc-primary",
+                    "state": "mailbox-state-1",
+                    "list": [
+                        { "id": "mb-inbox", "name": "Inbox", "role": "inbox", "parentId": null, "sortOrder": 1 }
+                    ],
+                    "notFound": []
+                }),
+            )))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+
+        let (source, _) = connected_source(&server, None).await;
+        let mailboxes = source.list_mailboxes().await.unwrap();
+        assert_eq!(mailboxes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn requests_do_not_retry_client_errors() {
+        let server = MockServer::start().await;
+        mock_session(&server).await;
+
+        // A 400 is a bug in our request, not a server hiccup; retrying it
+        // would only hammer the server with the same broken request.
+        Mock::given(method("POST"))
+            .and(path("/api"))
+            .and(body_string_contains("Mailbox/get"))
+            .and(body_string_contains("properties"))
+            .respond_with(ResponseTemplate::new(400))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (source, _) = connected_source(&server, None).await;
+        source
+            .list_mailboxes()
+            .await
+            .expect_err("a client error must fail without retries");
+        // MockServer verifies the `expect(1)` on drop.
     }
 
     #[tokio::test]

@@ -29,6 +29,12 @@ Notifications are only ever treated as a *hint* to synchronize — every synchro
 starts from the persisted server-state cursor, so missed or duplicated notifications can
 never lose data. In addition:
 
+- Every request to the mail server (including the initial connection) retries transient
+  failures — connection resets, timeouts, HTTP 5xx responses, and rate limiting — with
+  exponential backoff, riding out blips of up to about a minute. If the server keeps
+  failing despite the retries, a circuit breaker pauses all requests to it for a minute
+  so a struggling server is not hammered while it recovers; the run fails fast instead
+  and is retried by the daemon.
 - If the event stream drops, the daemon reconnects with exponential backoff and always
   runs a catch-up synchronization on reconnection.
 - A changes-based catch-up also runs every 6 hours regardless of notifications, as a
