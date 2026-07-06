@@ -2,7 +2,7 @@ use clap::Parser;
 use human_errors::Error;
 use std::sync::atomic::AtomicBool;
 use tracing_batteries::prelude::*;
-use tracing_batteries::{OpenTelemetry, Session};
+use tracing_batteries::{Analytics, OpenTelemetry, Session};
 
 #[macro_use]
 mod macros;
@@ -453,7 +453,9 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    let session = Session::new("mail-backup", version!()).with_battery(OpenTelemetry::new(""));
+    let session = Session::new("mail-backup", version!())
+        .with_battery(OpenTelemetry::new(""))
+        .with_battery(Analytics::new("https://analytics.sierrasoftworks.com"));
 
     let result = run(cli, &session).await;
 
