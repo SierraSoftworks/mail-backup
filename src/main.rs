@@ -88,6 +88,7 @@ async fn run(cli: Cli, session: &Session) -> Result<(), Error> {
                         &options,
                         &stream_options,
                         schedule,
+                        session,
                         &CANCEL,
                     )
                     .await
@@ -176,6 +177,9 @@ async fn run(cli: Cli, session: &Session) -> Result<(), Error> {
                         .observe(run, engine::BackupSummary::completed)
                         .await?;
                     summary.record_span(&Span::current());
+                    if summary.changes() > 0 {
+                        session.record_event("backup", (&summary).into());
+                    }
                     info!("Backup of '{}' complete: {}", name, summary);
                     Ok::<(), Error>(())
                 }
@@ -455,12 +459,17 @@ async fn main() {
 
     let session = Session::new("mail-backup", version!())
         .with_battery(OpenTelemetry::new(""))
-        .with_battery(Analytics::new("https://analytics.sierrasoftworks.com"));
+        .with_battery(
+            Analytics::new("https://analytics.sierrasoftworks.com").without_initial_page(),
+        );
 
     let result = run(cli, &session).await;
 
     if let Err(e) = result {
-        session.record_error(&e);
+        if e.is(human_errors::Kind::System) {
+            session.record_error(&e);
+        }
+
         // The tracing entry gets the plain one-line message (ANSI sequences
         // and box drawing get mangled by the log formatter); the nicely
         // formatted version goes directly to the console.

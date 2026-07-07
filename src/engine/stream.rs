@@ -95,6 +95,7 @@ pub async fn run<S: MailSource, T: MailStore>(
     options: &EngineOptions,
     stream_options: &StreamOptions,
     schedule: Option<&croner::Cron>,
+    session: &tracing_batteries::Session,
     cancel: &AtomicBool,
 ) -> Result<(), human_errors::Error> {
     let pinger = Pinger::new(policy.ping.clone());
@@ -149,6 +150,7 @@ pub async fn run<S: MailSource, T: MailStore>(
                 summary.record_span(&span);
                 if summary.changes() > 0 {
                     info!("Synchronized {}: {}", policy, summary);
+                    session.record_event("backup", (&summary).into());
                 }
                 if summary.interrupted {
                     break;
@@ -157,6 +159,10 @@ pub async fn run<S: MailSource, T: MailStore>(
             }
             Err(e) => {
                 span.record("error", display(&e));
+                if e.is(human_errors::Kind::System) {
+                    session.record_error(&e);
+                }
+
                 warn!(
                     "Synchronization of {} failed: {}; retrying in {:?}",
                     policy, e, backoff
@@ -180,6 +186,7 @@ pub async fn run<S: MailSource, T: MailStore>(
             options,
             stream_options,
             schedule,
+            session,
             cancel,
         )
         .await
@@ -218,6 +225,7 @@ pub(crate) async fn stream_phase<S: MailSource, T: MailStore>(
     options: &EngineOptions,
     stream_options: &StreamOptions,
     schedule: Option<&croner::Cron>,
+    session: &tracing_batteries::Session,
     cancel: &AtomicBool,
 ) -> StreamEnd {
     let stream = source.events(cancel);
@@ -287,7 +295,7 @@ pub(crate) async fn stream_phase<S: MailSource, T: MailStore>(
                 interrupted = EmptyField,
                 error = EmptyField,
             );
-            match run_sync(source, store, policy, options, cancel)
+            match run_sync(source, store, policy, options, session, cancel)
                 .instrument(span.clone())
                 .await
             {
@@ -361,12 +369,14 @@ async fn run_sync<S: MailSource, T: MailStore>(
     store: &mut T,
     policy: &BackupPolicy,
     options: &EngineOptions,
+    session: &tracing_batteries::Session,
     cancel: &AtomicBool,
 ) -> Result<BackupSummary, SyncFailure> {
     match sync::run(source, store, policy, options, cancel).await {
         Ok(outcome) if outcome.needs_reconcile => Err(SyncFailure::NeedsReconcile),
         Ok(outcome) => {
             if outcome.summary.changes() > 0 {
+                session.record_event("backup::live", (&outcome.summary).into());
                 info!("Applied live changes: {}", outcome.summary);
             }
             Ok(outcome.summary)
@@ -453,6 +463,9 @@ mod tests {
         let mut source = MockMailSource::new("acc-1");
         let mut store = GitMailStore::new(dir.path().to_path_buf(), None, None);
 
+        let session = tracing_batteries::Session::new("test", "0.0.0")
+            .with_battery(tracing_batteries::Testing);
+
         source.upsert_mailbox(mailbox("mb-inbox", "Inbox", Some("inbox")));
         let today = chrono::Utc::now().date_naive();
         source.add_message(
@@ -497,6 +510,7 @@ mod tests {
             &EngineOptions::default(),
             &fast_stream_options(),
             None,
+            &session,
             &cancel,
         )
         .await;
@@ -514,6 +528,9 @@ mod tests {
         let mut store = GitMailStore::new(dir.path().to_path_buf(), None, None);
         store.open().await.unwrap();
 
+        let session = tracing_batteries::Session::new("test", "0.0.0")
+            .with_battery(tracing_batteries::Testing);
+
         let end = stream_phase(
             "test",
             &source,
@@ -522,6 +539,7 @@ mod tests {
             &EngineOptions::default(),
             &fast_stream_options(),
             None,
+            &session,
             &cancel,
         )
         .await;
@@ -545,6 +563,9 @@ mod tests {
         let mut store = GitMailStore::new(dir.path().to_path_buf(), None, None);
         store.open().await.unwrap();
 
+        let session = tracing_batteries::Session::new("test", "0.0.0")
+            .with_battery(tracing_batteries::Testing);
+
         // Fires every minute; the safety poll (an hour out in the fast
         // options) is far enough away that the schedule comes due first.
         let schedule = croner::Cron::from_str("* * * * *").unwrap();
@@ -557,6 +578,7 @@ mod tests {
             &EngineOptions::default(),
             &fast_stream_options(),
             Some(&schedule),
+            &session,
             &cancel,
         )
         .await;
@@ -577,6 +599,9 @@ mod tests {
         let mut store = GitMailStore::new(dir.path().to_path_buf(), None, None);
         store.open().await.unwrap();
 
+        let session = tracing_batteries::Session::new("test", "0.0.0")
+            .with_battery(tracing_batteries::Testing);
+
         let policy = policy();
         let options = EngineOptions::default();
         let stream_options = fast_stream_options();
@@ -588,6 +613,7 @@ mod tests {
             &options,
             &stream_options,
             None,
+            &session,
             &cancel,
         );
 
@@ -607,6 +633,9 @@ mod tests {
         use std::sync::atomic::Ordering;
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let session = tracing_batteries::Session::new("test", "0.0.0")
+            .with_battery(tracing_batteries::Testing);
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -648,6 +677,7 @@ mod tests {
             &options,
             &stream_options,
             Some(&schedule),
+            &session,
             &cancel,
         );
         // Stop once both the initial pass and at least one scheduled refresh
@@ -691,6 +721,9 @@ mod tests {
         let mut source = MockMailSource::new("acc-1");
         let mut store = GitMailStore::new(dir.path().to_path_buf(), None, None);
 
+        let session = tracing_batteries::Session::new("test", "0.0.0")
+            .with_battery(tracing_batteries::Testing);
+
         source.upsert_mailbox(mailbox("mb-inbox", "Inbox", Some("inbox")));
         source.add_message(
             meta("M1", &["mb-inbox"], &[], "2023-01-01T08:00:00Z"),
@@ -715,6 +748,7 @@ mod tests {
             &options,
             &stream_options,
             None,
+            &session,
             &cancel,
         );
 

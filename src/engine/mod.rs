@@ -13,6 +13,7 @@ use std::fmt::Display;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::stream::{StreamExt, TryStreamExt};
+use std::collections::HashMap;
 use tracing_batteries::prelude::*;
 
 use crate::BackupPolicy;
@@ -126,6 +127,24 @@ impl Display for BackupSummary {
             write!(f, " (interrupted)")?;
         }
         Ok(())
+    }
+}
+
+impl Into<HashMap<String, String>> for &BackupSummary {
+    fn into(self) -> HashMap<String, String> {
+        [
+            ("added", self.added),
+            ("moved", self.moved),
+            ("updated", self.updated),
+            ("removed", self.removed),
+            ("unchanged", self.unchanged),
+            ("skipped", self.skipped),
+            ("interrupted", self.interrupted as usize),
+        ]
+        .into_iter()
+        .filter(|(_, v)| *v > 0)
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect::<HashMap<_, _>>()
     }
 }
 
