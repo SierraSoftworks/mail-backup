@@ -59,7 +59,7 @@ tempfile = "3.25.0"
 # tokio features are likewise test-only); pinned to the version
 # jmap-client already uses.
 tokio = { version = "1.50.0", features = ["net", "test-util"] }
-tokio-tungstenite = "0.29.0"
+tokio-tungstenite = "0.30.0"
 wiremock = "0.6.2"
 
 [features]
