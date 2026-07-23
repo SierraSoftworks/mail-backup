@@ -99,7 +99,7 @@ A plain directory tree with the same layout, but no version history.
 
 ### Cron monitoring (`ping`)
 Reports the lifecycle of each scheduled backup run to an external HTTP cron monitor —
-for example [Sentry Crons](https://docs.sentry.io/product/crons/) or
+for example [Sentry Crons](https://docs.sentry.io/product/crons/), [Watchgoose](https://watchgoose.com), or
 [Healthchecks.io](https://healthchecks.io/). Each state has its own URL, fetched with a
 plain HTTP `GET` as the run reaches it; any state you omit is simply not reported. Only
 full backup runs are reported — a one-shot `backup`, and in the daemon the initial pass
@@ -130,10 +130,17 @@ backups:
       start: https://sentry.io/api/0/monitors/personal/<key>/?status=in_progress
       success: https://sentry.io/api/0/monitors/personal/<key>/?status=ok
       failure: https://sentry.io/api/0/monitors/personal/<key>/?status=error
+
       # … while Healthchecks.io uses a path suffix:
       # start: https://hc-ping.com/<uuid>/start
       # success: https://hc-ping.com/<uuid>
       # failure: https://hc-ping.com/<uuid>/fail
+
+      # … and Watchgoose does something similar:
+      # start: https://watchgoose.com/ping/<uuid>/start
+      # success: https://watchgoose.com/ping/<uuid>
+      # failure: https://watchgoose.com/ping/<uuid>/fail
+
 ```
 
 ## Restore policy fields
