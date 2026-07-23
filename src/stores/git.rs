@@ -89,7 +89,7 @@ impl GitMailStore {
     /// repository handle keeps the configuration it was opened with.
     fn update_config(
         &self,
-        update: impl FnOnce(&mut gix::config::File<'static>) -> Result<(), human_errors::Error>,
+        update: impl FnOnce(&mut gix::config::File) -> Result<(), human_errors::Error>,
     ) -> Result<(), human_errors::Error> {
         let config_path = self.repo().path().join("config");
         let mut config = gix::config::File::from_path_no_includes(
