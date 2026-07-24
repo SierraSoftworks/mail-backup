@@ -130,16 +130,16 @@ impl Display for BackupSummary {
     }
 }
 
-impl Into<HashMap<String, String>> for &BackupSummary {
-    fn into(self) -> HashMap<String, String> {
+impl From<&BackupSummary> for HashMap<String, String> {
+    fn from(summary: &BackupSummary) -> Self {
         [
-            ("added", self.added),
-            ("moved", self.moved),
-            ("updated", self.updated),
-            ("removed", self.removed),
-            ("unchanged", self.unchanged),
-            ("skipped", self.skipped),
-            ("interrupted", self.interrupted as usize),
+            ("added", summary.added),
+            ("moved", summary.moved),
+            ("updated", summary.updated),
+            ("removed", summary.removed),
+            ("unchanged", summary.unchanged),
+            ("skipped", summary.skipped),
+            ("interrupted", summary.interrupted as usize),
         ]
         .into_iter()
         .filter(|(_, v)| *v > 0)
