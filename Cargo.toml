@@ -11,7 +11,7 @@ homepage = "https://mail-backup.sierrasoftworks.com"
 async-stream = "0.3.6"
 chrono = { version = "0.4.44", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive", "string"] }
-croner = "3.0.1"
+croner = "4.0.0"
 # The termination feature extends the shutdown handler to SIGTERM/SIGHUP,
 # which is how Docker and systemd stop the daemon.
 ctrlc = { version = "3.5.2", features = ["termination"] }
