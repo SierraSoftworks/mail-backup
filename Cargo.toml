@@ -53,7 +53,7 @@ url = { version = "2.5.7", features = ["serde"] }
 
 [dev-dependencies]
 http = "1.4.1"
-rstest = "0.26.1"
+rstest = "0.27.0"
 tempfile = "3.25.0"
 # For the in-process websocket test server (the "net" and "test-util"
 # tokio features are likewise test-only); pinned to the version
