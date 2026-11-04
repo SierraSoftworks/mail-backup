@@ -26,7 +26,7 @@ impl Config {
             format!("Failed to read the config file {}.", path),
             &["Make sure that the configuration file exists and can be read by the process."],
         )?;
-        let config: Config = serde_yaml::from_str(&content).wrap_user_err(
+        let config: Config = serde_norway::from_str(&content).wrap_user_err(
             "Failed to parse your configuration file, as it is not recognized as valid YAML.",
             &["Make sure that your configuration file is formatted correctly."],
         )?;
@@ -57,13 +57,13 @@ mod tests {
     #[case("0 0 * * *")]
     #[case("0 */5 * * *")]
     fn deserialize_cron(#[case] format: &str) {
-        let config: Config = serde_yaml::from_str(&format!("schedule: {}", format)).unwrap();
+        let config: Config = serde_norway::from_str(&format!("schedule: {}", format)).unwrap();
         assert!(config.schedule.is_some());
     }
 
     #[test]
     fn deserialize_cron_not_provided() {
-        let config: Config = serde_yaml::from_str("").unwrap();
+        let config: Config = serde_norway::from_str("").unwrap();
         assert!(config.schedule.is_none());
         assert!(config.backups.is_empty());
         assert!(config.restores.is_empty());
@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn deserialize_named_policies() {
-        let config: Config = serde_yaml::from_str(
+        let config: Config = serde_norway::from_str(
             r#"
             backups:
               personal:

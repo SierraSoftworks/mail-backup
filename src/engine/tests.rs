@@ -43,7 +43,7 @@ fn policy(filter: Option<&str>) -> BackupPolicy {
     let filter_line = filter
         .map(|f| format!("filter: '{f}'\n"))
         .unwrap_or_default();
-    serde_yaml::from_str(&format!(
+    serde_norway::from_str(&format!(
         "from: !Jmap {{ url: 'http://mock', token: 'token' }}\nto: !LocalDir {{ path: '/unused' }}\n{filter_line}"
     ))
     .unwrap()
@@ -557,7 +557,7 @@ async fn works_against_plain_directory_store() {
     assert!(dir.path().join(".mail-backup/state.json").exists());
 
     // SourceConfig sugar resolves the Fastmail base URL.
-    let config: SourceConfig = serde_yaml::from_str("!Fastmail { token: t }").unwrap();
+    let config: SourceConfig = serde_norway::from_str("!Fastmail { token: t }").unwrap();
     assert_eq!(config.session_url(), "https://api.fastmail.com");
     let _ = SnapshotKind::Live; // silence unused-import lint in cfg(test)
 }

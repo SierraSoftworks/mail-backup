@@ -77,13 +77,13 @@ impl MessageSidecar {
 
     /// Serializes this sidecar to its canonical byte representation.
     pub fn to_canonical_bytes(&self) -> Vec<u8> {
-        serde_yaml::to_string(self)
+        serde_norway::to_string(self)
             .expect("sidecar serialization cannot fail")
             .into_bytes()
     }
 
     pub fn parse(content: &[u8]) -> Result<Self, human_errors::Error> {
-        serde_yaml::from_slice(content).wrap_system_err(
+        serde_norway::from_slice(content).wrap_system_err(
             "Failed to parse a message metadata sidecar file.",
             &[
                 "The sidecar file may have been modified or corrupted. Run `mail-backup index` to rebuild the store's index, or restore the file from git history.",
@@ -133,13 +133,13 @@ impl MailboxSidecar {
     }
 
     pub fn to_canonical_bytes(&self) -> Vec<u8> {
-        serde_yaml::to_string(self)
+        serde_norway::to_string(self)
             .expect("mailbox sidecar serialization cannot fail")
             .into_bytes()
     }
 
     pub fn parse(content: &[u8]) -> Result<Self, human_errors::Error> {
-        serde_yaml::from_slice(content).wrap_system_err(
+        serde_norway::from_slice(content).wrap_system_err(
             "Failed to parse a mailbox metadata file.",
             &[
                 "The .mailbox.yaml file may have been modified or corrupted. Run `mail-backup index` to rebuild the store's index, or restore the file from git history.",
