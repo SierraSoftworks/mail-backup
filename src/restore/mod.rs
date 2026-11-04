@@ -590,7 +590,7 @@ mod tests {
         let prefix_line = prefix
             .map(|p| format!("mailbox_prefix: {p}\n"))
             .unwrap_or_default();
-        serde_yaml::from_str(&format!(
+        serde_norway::from_str(&format!(
             "from: !LocalGit {{ path: '{}' }}\nto: !Fastmail {{ token: t }}\n{prefix_line}",
             root.display().to_string().replace('\\', "/")
         ))
@@ -801,7 +801,7 @@ mod tests {
         let eml = find_first_eml(plain.path());
         std::fs::write(&eml, b"tampered contents").unwrap();
 
-        let policy: RestorePolicy = serde_yaml::from_str(&format!(
+        let policy: RestorePolicy = serde_norway::from_str(&format!(
             "from: !LocalDir {{ path: '{}' }}\nto: !Fastmail {{ token: t }}",
             plain.path().display().to_string().replace('\\', "/")
         ))

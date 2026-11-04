@@ -440,7 +440,7 @@ mod tests {
     }
 
     fn policy() -> crate::BackupPolicy {
-        serde_yaml::from_str(
+        serde_norway::from_str(
             "from: !Jmap { url: 'http://mock', token: 'token' }\nto: !LocalDir { path: '/unused' }",
         )
         .unwrap()
@@ -658,7 +658,7 @@ mod tests {
 
         // A policy that pings the mock monitor, and a per-second schedule so a
         // snapshot refresh comes due promptly.
-        let policy: crate::BackupPolicy = serde_yaml::from_str(&format!(
+        let policy: crate::BackupPolicy = serde_norway::from_str(&format!(
             "from: !Jmap {{ url: 'http://mock', token: 'token' }}\n\
              to: !LocalDir {{ path: '/unused' }}\n\
              ping:\n  start: {base}/start\n  success: {base}/ok\n",

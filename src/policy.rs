@@ -209,7 +209,7 @@ mod tests {
           filter: message.mailbox == "INBOX"
           backfill_start: 2008-01-01
         "#;
-        let policy: BackupPolicy = serde_yaml::from_str(policy).unwrap();
+        let policy: BackupPolicy = serde_norway::from_str(policy).unwrap();
         assert_eq!(
             policy.from,
             SourceConfig::Fastmail {
@@ -247,7 +247,7 @@ mod tests {
             success: https://sentry.io/api/0/cron/personal/key/?status=ok
             failure: https://sentry.io/api/0/cron/personal/key/?status=error
         "#;
-        let policy: BackupPolicy = serde_yaml::from_str(policy).unwrap();
+        let policy: BackupPolicy = serde_norway::from_str(policy).unwrap();
         assert_eq!(
             policy.ping.start.as_ref().unwrap().as_str(),
             "https://sentry.io/api/0/cron/personal/key/?status=in_progress"
@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn ping_defaults_to_disabled() {
-        let policy: BackupPolicy = serde_yaml::from_str(
+        let policy: BackupPolicy = serde_norway::from_str(
             "from: !Fastmail { token: x }\nto: !LocalDir { path: /backup/mail }",
         )
         .unwrap();
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn deserialize_partial_ping() {
-        let policy: BackupPolicy = serde_yaml::from_str(
+        let policy: BackupPolicy = serde_norway::from_str(
             "from: !Fastmail { token: x }\nto: !LocalDir { path: /x }\nping:\n  failure: https://example.com/fail",
         )
         .unwrap();
@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn invalid_ping_url_fails_to_deserialize() {
-        let result = serde_yaml::from_str::<BackupPolicy>(
+        let result = serde_norway::from_str::<BackupPolicy>(
             "from: !Fastmail { token: x }\nto: !LocalDir { path: /x }\nping:\n  start: \"not a url\"",
         );
         assert!(result.is_err(), "an unparseable ping URL should fail");
@@ -302,7 +302,7 @@ mod tests {
           to: !LocalDir
             path: /backup/mail
         "#;
-        let policy: BackupPolicy = serde_yaml::from_str(policy).unwrap();
+        let policy: BackupPolicy = serde_norway::from_str(policy).unwrap();
         assert_eq!(policy.from.session_url(), "https://jmap.example.com");
         assert_eq!(policy.from.token(), "secret");
         assert_eq!(policy.from.account(), None);
@@ -321,7 +321,7 @@ mod tests {
           dedupe: message-id
           mailbox_prefix: Restored
         "#;
-        let policy: RestorePolicy = serde_yaml::from_str(policy).unwrap();
+        let policy: RestorePolicy = serde_norway::from_str(policy).unwrap();
         assert_eq!(policy.dedupe, DedupeMode::MessageId);
         assert_eq!(policy.mailbox_prefix.as_deref(), Some("Restored"));
         assert_eq!(format!("{}", policy), "LocalGit(/backup/mail) -> Fastmail");
@@ -337,25 +337,27 @@ mod tests {
             #[serde(default)]
             dedupe: DedupeMode,
         }
-        let wrapper: Wrapper = serde_yaml::from_str(yaml).unwrap();
+        let wrapper: Wrapper = serde_norway::from_str(yaml).unwrap();
         assert_eq!(wrapper.dedupe, expected);
     }
 
     #[test]
     fn missing_required_fields_fail() {
-        let result =
-            serde_yaml::from_str::<BackupPolicy>("from: !Fastmail {}\nto: !LocalDir { path: /x }");
+        let result = serde_norway::from_str::<BackupPolicy>(
+            "from: !Fastmail {}\nto: !LocalDir { path: /x }",
+        );
         assert!(result.is_err(), "missing token should fail to deserialize");
 
-        let result =
-            serde_yaml::from_str::<BackupPolicy>("from: !Fastmail { token: x }\nto: !LocalGit {}");
+        let result = serde_norway::from_str::<BackupPolicy>(
+            "from: !Fastmail { token: x }\nto: !LocalGit {}",
+        );
         assert!(result.is_err(), "missing path should fail to deserialize");
     }
 
     #[test]
     fn debug_does_not_leak_token() {
         let source: SourceConfig =
-            serde_yaml::from_str("!Fastmail { token: super-secret }").unwrap();
+            serde_norway::from_str("!Fastmail { token: super-secret }").unwrap();
         let debug = format!("{:?}", source);
         assert!(!debug.contains("super-secret"));
     }
