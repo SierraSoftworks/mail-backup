@@ -2759,9 +2759,9 @@ dependencies = [
 
 [[package]]
 name = "jmap-client"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5b5bc66252cc8e779ef1238f40ab93971d54ad00b5d7afb5c1d447a9647ed62"
+checksum = "2d33af38bf07fa99543baf5c8e17f7df014a0dd02bd18f14ecd34d529d51eb95"
 dependencies = [
  "ahash",
  "async-stream",
