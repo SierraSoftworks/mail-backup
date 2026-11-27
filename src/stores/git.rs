@@ -425,7 +425,11 @@ impl GitMailStore {
         let repo = self.repo();
         match repo.index_from_tree(&tree) {
             Ok(mut index) => {
-                if let Err(e) = index.write(Default::default()) {
+                // gix 0.91 requires the `core.sharedRepository` policy for newly
+                // written files; reuse the one gix resolved for this repository.
+                if let Err(e) =
+                    index.write(Default::default(), repo.refs.shared_repository_permissions)
+                {
                     debug!("Could not refresh the git index after committing: {}", e);
                 }
             }
